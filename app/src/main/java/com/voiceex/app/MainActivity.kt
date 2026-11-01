@@ -203,7 +203,10 @@ class MainActivity : androidx.activity.ComponentActivity() {
         val language = getPreferences(MODE_PRIVATE)
             .getString(RECOGNITION_LANGUAGE_KEY, DEFAULT_RECOGNITION_LANGUAGE)
             ?: DEFAULT_RECOGNITION_LANGUAGE
-        uiState = uiState.copy(selectedRecognitionLanguage = language)
+        uiState = uiState.copy(
+            recognitionLanguages = listOf(language),
+            selectedRecognitionLanguage = language,
+        )
     }
 
     private fun loadRecognitionLanguages() {
@@ -274,9 +277,12 @@ class MainActivity : androidx.activity.ComponentActivity() {
         .sorted()
 
     private fun setRecognitionLanguages(languages: List<String>) {
-        val availableLanguages = languages.ifEmpty { listOf(DEFAULT_RECOGNITION_LANGUAGE) }
         val savedLanguage = getPreferences(MODE_PRIVATE)
             .getString(RECOGNITION_LANGUAGE_KEY, DEFAULT_RECOGNITION_LANGUAGE)
+        val availableLanguages = (
+            languages.ifEmpty { listOf(DEFAULT_RECOGNITION_LANGUAGE) } +
+                listOfNotNull(savedLanguage)
+            ).distinct()
         val selectedLanguage = savedLanguage?.takeIf { it in availableLanguages }
             ?: DEFAULT_RECOGNITION_LANGUAGE.takeIf { it in availableLanguages }
             ?: availableLanguages.first()
@@ -339,27 +345,32 @@ class MainActivity : androidx.activity.ComponentActivity() {
         val voices = engine.voices.orEmpty()
         val russian = voices.filter { it.locale.language == "ru" }
         val english = voices
-            .filter { it.locale.language == "en" && it.locale.country == "US" }
-            .sortedWith(compareBy<android.speech.tts.Voice> { it.isNetworkConnectionRequired }.thenByDescending { it.quality })
-            .take(1)
-            .ifEmpty {
-                voices.filter { it.locale.language == "en" }.take(1)
-            }
+            .filter { it.locale.language == "en" }
+            .sortedWith(
+                compareBy<android.speech.tts.Voice> { it.locale.country != "US" }
+                    .thenBy { it.isNetworkConnectionRequired }
+                    .thenByDescending { it.quality }
+                    .thenBy { it.name },
+            )
         val preferences = getPreferences(MODE_PRIVATE)
         val savedRussian = preferences.getString(RUSSIAN_VOICE_KEY, null)
         val savedEnglish = preferences.getString(ENGLISH_VOICE_KEY, null)
-        val russianNames = russian.map { it.name }
-        val englishNames = english.map { it.name }
-        val selectedRussian = savedRussian?.takeIf { it in russianNames } ?: russian.firstOrNull()?.name.orEmpty()
-        val selectedEnglish = savedEnglish?.takeIf { it in englishNames } ?: english.firstOrNull()?.name.orEmpty()
+        val russianNames = (russian.map { it.name } + listOfNotNull(savedRussian)).distinct()
+        val englishNames = (english.map { it.name } + listOfNotNull(savedEnglish)).distinct()
+        val selectedRussian = savedRussian ?: russian.firstOrNull()?.name.orEmpty()
+        val selectedEnglish = savedEnglish ?: english.firstOrNull()?.name.orEmpty()
         updateState {
             copy(
                 russianVoices = russianNames,
                 englishVoices = englishNames,
                 selectedRussianVoice = selectedRussian,
                 selectedEnglishVoice = selectedEnglish,
-                voiceStatus = if (russian.isEmpty() || english.isEmpty()) {
-                    "Для выбора голосов установите русский и английский речевые пакеты в настройках Android."
+                voiceStatus = if (
+                    russian.isEmpty() || english.isEmpty() ||
+                    (savedRussian != null && savedRussian !in russian.map { it.name }) ||
+                    (savedEnglish != null && savedEnglish !in english.map { it.name })
+                ) {
+                    "Некоторые сохранённые голоса сейчас недоступны. Установите нужный речевой пакет; Android временно использует голос по умолчанию."
                 } else {
                     "Голоса озвучивания загружены."
                 },
