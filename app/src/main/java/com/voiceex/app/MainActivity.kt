@@ -103,7 +103,11 @@ class MainActivity : androidx.activity.ComponentActivity() {
     private var speechRecognizer: SpeechRecognizer? = null
     private var textToSpeech: TextToSpeech? = null
     private var isListening = false
+    private var awaitingRecognitionResult = false
+    private var recognitionAttemptId = 0L
     private var recognitionRestartAttempts = 0
+    private var recognitionRetryCount = 0
+    private var recognitionResultTimeout: Runnable? = null
     private var utteranceId: String? = null
     private var speechContinuation: (() -> Unit)? = null
 
@@ -182,9 +186,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
             return false
         }
         return try {
-            speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this).also { recognizer ->
-                recognizer.setRecognitionListener(recognitionListener)
-            }
+            speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this)
             true
         } catch (error: RuntimeException) {
             updateState {
@@ -297,6 +299,8 @@ class MainActivity : androidx.activity.ComponentActivity() {
         val phrase = uiState.phrases.getOrNull(uiState.currentIndex) ?: return
         cancelRecognition()
         cancelSpeech()
+        recognitionRestartAttempts = 0
+        recognitionRetryCount = 0
         updateState {
             copy(
                 isActive = true,
@@ -319,12 +323,15 @@ class MainActivity : androidx.activity.ComponentActivity() {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, language)
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 5)
-            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
+            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
             putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, uiState.recognitionWait.millis)
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, uiState.recognitionWait.millis / 2)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, uiState.recognitionWait.millis)
         }
         try {
+            val attemptId = ++recognitionAttemptId
+            speechRecognizer?.setRecognitionListener(createRecognitionListener(attemptId))
             isListening = true
+            awaitingRecognitionResult = false
             updateState { copy(recognitionStatus = "Запускаю распознавание речи...") }
             speechRecognizer?.startListening(intent)
         } catch (error: RuntimeException) {
@@ -341,32 +348,35 @@ class MainActivity : androidx.activity.ComponentActivity() {
         }
     }
 
-    private val recognitionListener = object : RecognitionListener {
+    private fun createRecognitionListener(attemptId: Long) = object : RecognitionListener {
         override fun onReadyForSpeech(params: Bundle?) {
+            if (attemptId != recognitionAttemptId) return
             isListening = true
-            recognitionRestartAttempts = 0
             updateState { copy(recognitionStatus = "Слушаю перевод по-английски...") }
         }
 
         override fun onBeginningOfSpeech() {
+            if (attemptId != recognitionAttemptId) return
             updateState { copy(recognitionStatus = "Речь обнаружена, распознаю перевод...") }
         }
         override fun onRmsChanged(rmsdB: Float) = Unit
         override fun onBufferReceived(buffer: ByteArray?) = Unit
         override fun onEndOfSpeech() {
+            if (attemptId != recognitionAttemptId) return
             isListening = false
+            awaitingRecognitionResult = true
             if (uiState.isActive) updateState { copy(recognitionStatus = "Обрабатываю перевод...") }
+            scheduleRecognitionResultTimeout(attemptId)
         }
 
         override fun onError(error: Int) {
+            if (!finishRecognitionAttempt(attemptId)) return
             isListening = false
+            awaitingRecognitionResult = false
             if (!uiState.isActive) return
             when (error) {
                 SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> {
-                    updateState {
-                        copy(recognitionStatus = "Речь не распознана. Попробуйте ещё раз или скажите “Repeat phrase”.")
-                    }
-                    listenAgain()
+                    retryAfterUnrecognizedSpeech()
                 }
                 SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS ->
                     updateState { copy(recognitionStatus = "Разрешите приложению доступ к микрофону в настройках Android.") }
@@ -392,29 +402,82 @@ class MainActivity : androidx.activity.ComponentActivity() {
         }
 
         override fun onResults(results: Bundle?) {
+            if (!finishRecognitionAttempt(attemptId)) return
             isListening = false
+            awaitingRecognitionResult = false
             val alternatives = results
                 ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                 .orEmpty()
             handleRecognition(alternatives)
         }
 
-        override fun onPartialResults(partialResults: Bundle?) = Unit
+        override fun onPartialResults(partialResults: Bundle?) {
+            if (attemptId != recognitionAttemptId || !uiState.isActive) return
+            val alternatives = partialResults
+                ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                .orEmpty()
+            val expected = uiState.phrases.getOrNull(uiState.currentIndex)
+                ?.translation
+                ?.let(::normalizeSpeech)
+            if (expected != null && alternatives.any { normalizeSpeech(it) == expected }) {
+                finishRecognitionAttempt(attemptId)
+                isListening = false
+                awaitingRecognitionResult = false
+                recognitionRetryCount = 0
+                speechRecognizer?.cancel()
+                handleRecognition(alternatives)
+            }
+        }
         override fun onEvent(eventType: Int, params: Bundle?) = Unit
+    }
+
+    private fun finishRecognitionAttempt(attemptId: Long): Boolean {
+        if (attemptId != recognitionAttemptId) return false
+        recognitionAttemptId++
+        recognitionResultTimeout?.let(mainHandler::removeCallbacks)
+        recognitionResultTimeout = null
+        return true
+    }
+
+    private fun scheduleRecognitionResultTimeout(attemptId: Long) {
+        recognitionResultTimeout?.let(mainHandler::removeCallbacks)
+        recognitionResultTimeout = Runnable {
+            if (attemptId != recognitionAttemptId || !awaitingRecognitionResult || !uiState.isActive) return@Runnable
+            finishRecognitionAttempt(attemptId)
+            awaitingRecognitionResult = false
+            isListening = false
+            speechRecognizer?.cancel()
+            recreateSpeechRecognizer()
+            updateState {
+                copy(recognitionStatus = "Служба речи не вернула результат. Проверьте интернет и настройки распознавания речи, затем нажмите «Повторить».")
+            }
+        }.also { mainHandler.postDelayed(it, RECOGNITION_RESULT_TIMEOUT_MILLIS) }
     }
 
     private fun handleRecognition(alternatives: List<String>) {
         if (!uiState.isActive) return
         if (alternatives.isEmpty()) {
-            updateState { copy(recognitionStatus = "Речь не распознана. Попробуйте ещё раз.") }
-            listenAgain()
+            retryAfterUnrecognizedSpeech()
             return
         }
+        recognitionRetryCount = 0
         if (alternatives.any(::isRepeatCommand)) {
             beginPrompt()
             return
         }
         checkAnswer(alternatives)
+    }
+
+    private fun retryAfterUnrecognizedSpeech() {
+        if (recognitionRetryCount < MAX_NO_MATCH_RETRIES) {
+            recognitionRetryCount++
+            updateState { copy(recognitionStatus = "Речь не распознана. Слушаю ещё раз...") }
+            listenAgain()
+        } else {
+            updateState {
+                copy(recognitionStatus = "Не удалось распознать речь. Проверьте язык и службу распознавания, затем нажмите «Повторить».")
+            }
+        }
     }
 
     private fun checkAnswer(alternatives: List<String>) {
@@ -502,8 +565,11 @@ class MainActivity : androidx.activity.ComponentActivity() {
 
     private fun cancelRecognition() {
         mainHandler.removeCallbacksAndMessages(null)
-        if (isListening) speechRecognizer?.cancel()
+        recognitionResultTimeout = null
+        recognitionAttemptId++
+        if (isListening || awaitingRecognitionResult) speechRecognizer?.cancel()
         isListening = false
+        awaitingRecognitionResult = false
     }
 
     private fun stopPractice() {
@@ -594,6 +660,8 @@ class MainActivity : androidx.activity.ComponentActivity() {
 
     companion object {
         private const val MAX_RECOGNITION_RESTARTS = 3
+        private const val MAX_NO_MATCH_RETRIES = 2
+        private const val RECOGNITION_RESULT_TIMEOUT_MILLIS = 10_000L
         private const val PHRASES_KEY = "voicePractice.phrases"
         private const val RUSSIAN_VOICE_KEY = "voicePractice.russianVoice"
         private const val ENGLISH_VOICE_KEY = "voicePractice.englishVoice"
