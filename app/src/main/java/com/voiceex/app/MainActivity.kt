@@ -1,13 +1,19 @@
 package com.voiceex.app
 
 import android.Manifest
+import android.app.Activity
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
+import android.speech.RecognitionSupport
+import android.speech.RecognitionSupportCallback
 import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
@@ -69,6 +75,7 @@ private val Green = Color(0xFF15765F)
 private val GreenDark = Color(0xFF105B49)
 private val Coral = Color(0xFFC85C47)
 private val Line = Color(0xFFDCE3DC)
+private const val DEFAULT_RECOGNITION_LANGUAGE = "en-US"
 
 private data class AnswerReveal(val recognized: String, val expected: String)
 
@@ -85,6 +92,9 @@ private data class PracticeUiState(
     val englishVoices: List<String> = emptyList(),
     val selectedRussianVoice: String = "",
     val selectedEnglishVoice: String = "",
+    val recognitionLanguages: List<String> = listOf(DEFAULT_RECOGNITION_LANGUAGE),
+    val selectedRecognitionLanguage: String = DEFAULT_RECOGNITION_LANGUAGE,
+    val recognitionLanguageStatus: String = "Загружаю языки распознавания...",
     val voiceStatus: String = "Голоса загружаются...",
 )
 
@@ -97,7 +107,6 @@ class MainActivity : androidx.activity.ComponentActivity() {
     private var awaitingRecognitionResult = false
     private var recognitionAttemptId = 0L
     private var recognitionRestartAttempts = 0
-    private var recognitionRetryCount = 0
     private var recognitionResultTimeout: Runnable? = null
     private var utteranceId: String? = null
     private var speechContinuation: (() -> Unit)? = null
@@ -113,6 +122,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        loadSavedRecognitionLanguage()
         initializeSpeech()
         loadSavedPhrases()
         setContent {
@@ -135,6 +145,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
                         onSavePhrases = ::savePhrases,
                         onChooseRussianVoice = { saveVoice("russianVoice", it, true) },
                         onChooseEnglishVoice = { saveVoice("englishVoice", it, false) },
+                        onChooseRecognitionLanguage = ::saveRecognitionLanguage,
                     )
                 }
             }
@@ -142,7 +153,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
     }
 
     private fun initializeSpeech() {
-        ensureSpeechRecognizer()
+        if (ensureSpeechRecognizer()) loadRecognitionLanguages()
 
         textToSpeech = TextToSpeech(this) { result ->
             if (result == TextToSpeech.SUCCESS) {
@@ -186,6 +197,109 @@ class MainActivity : androidx.activity.ComponentActivity() {
             }
             false
         }
+    }
+
+    private fun loadSavedRecognitionLanguage() {
+        val language = getPreferences(MODE_PRIVATE)
+            .getString(RECOGNITION_LANGUAGE_KEY, DEFAULT_RECOGNITION_LANGUAGE)
+            ?: DEFAULT_RECOGNITION_LANGUAGE
+        uiState = uiState.copy(selectedRecognitionLanguage = language)
+    }
+
+    private fun loadRecognitionLanguages() {
+        val recognizer = speechRecognizer ?: return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+            }
+            try {
+                recognizer.checkRecognitionSupport(
+                    intent,
+                    ContextCompat.getMainExecutor(this),
+                    object : RecognitionSupportCallback {
+                        override fun onSupportResult(recognitionSupport: RecognitionSupport) {
+                            val languages = (
+                                recognitionSupport.onlineLanguages +
+                                    recognitionSupport.installedOnDeviceLanguages +
+                                    recognitionSupport.supportedOnDeviceLanguages
+                                ).filterEnglishRecognitionLanguages()
+                            if (languages.isEmpty()) loadRecognitionLanguagesFromBroadcast()
+                            else setRecognitionLanguages(languages)
+                        }
+
+                        override fun onError(error: Int) {
+                            loadRecognitionLanguagesFromBroadcast()
+                        }
+                    },
+                )
+            } catch (_: UnsupportedOperationException) {
+                loadRecognitionLanguagesFromBroadcast()
+            } catch (_: RuntimeException) {
+                loadRecognitionLanguagesFromBroadcast()
+            }
+        } else {
+            loadRecognitionLanguagesFromBroadcast()
+        }
+    }
+
+    private fun loadRecognitionLanguagesFromBroadcast() {
+        val request = Intent(RecognizerIntent.ACTION_GET_LANGUAGE_DETAILS)
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                val languages = getResultExtras(true)
+                    ?.getStringArrayList(RecognizerIntent.EXTRA_SUPPORTED_LANGUAGES)
+                    .orEmpty()
+                    .filterEnglishRecognitionLanguages()
+                setRecognitionLanguages(languages)
+            }
+        }
+        try {
+            sendOrderedBroadcast(
+                request,
+                null,
+                receiver,
+                mainHandler,
+                Activity.RESULT_OK,
+                null,
+                null,
+            )
+        } catch (_: RuntimeException) {
+            setRecognitionLanguages(emptyList())
+        }
+    }
+
+    private fun List<String>.filterEnglishRecognitionLanguages(): List<String> = distinct()
+        .filter { Locale.forLanguageTag(it).language == "en" }
+        .sorted()
+
+    private fun setRecognitionLanguages(languages: List<String>) {
+        val availableLanguages = languages.ifEmpty { listOf(DEFAULT_RECOGNITION_LANGUAGE) }
+        val savedLanguage = getPreferences(MODE_PRIVATE)
+            .getString(RECOGNITION_LANGUAGE_KEY, DEFAULT_RECOGNITION_LANGUAGE)
+        val selectedLanguage = savedLanguage?.takeIf { it in availableLanguages }
+            ?: DEFAULT_RECOGNITION_LANGUAGE.takeIf { it in availableLanguages }
+            ?: availableLanguages.first()
+        getPreferences(MODE_PRIVATE).edit().putString(RECOGNITION_LANGUAGE_KEY, selectedLanguage).apply()
+        updateState {
+            copy(
+                recognitionLanguages = availableLanguages,
+                selectedRecognitionLanguage = selectedLanguage,
+                recognitionLanguageStatus = if (languages.isEmpty()) {
+                    "Служба не предоставила список языков. Используется английский (США); доступность зависит от службы распознавания."
+                } else if (availableLanguages.size == 1) {
+                    "Служба распознавания сообщает только один доступный вариант."
+                } else {
+                    "Доступно языков распознавания: ${availableLanguages.size}."
+                },
+            )
+        }
+    }
+
+    private fun saveRecognitionLanguage(language: String) {
+        if (language !in uiState.recognitionLanguages) return
+        getPreferences(MODE_PRIVATE).edit().putString(RECOGNITION_LANGUAGE_KEY, language).apply()
+        updateState { copy(selectedRecognitionLanguage = language) }
     }
 
     private fun loadSavedPhrases() {
@@ -284,7 +398,6 @@ class MainActivity : androidx.activity.ComponentActivity() {
         cancelRecognition()
         cancelSpeech()
         recognitionRestartAttempts = 0
-        recognitionRetryCount = 0
         updateState {
             copy(
                 isActive = true,
@@ -293,7 +406,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
                 recognitionStatus = "Слушайте исходную фразу...",
             )
         }
-        speak(phrase.prompt, "ru-RU") { startListening("en-US") }
+        speak(phrase.prompt, "ru-RU") { startListening(uiState.selectedRecognitionLanguage) }
     }
 
     private fun startListening(language: String) {
@@ -366,7 +479,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
                     updateState { copy(recognitionStatus = "Нет соединения со службой распознавания речи.") }
                 SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED, SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE ->
                     updateState {
-                        copy(recognitionStatus = "Служба не поддерживает английский (США). Установите английский речевой пакет или выберите другую службу распознавания в Android.")
+                        copy(recognitionStatus = "Служба не поддерживает выбранный язык (${uiState.selectedRecognitionLanguage}). Выберите другой язык распознавания или установите его речевой пакет в Android.")
                     }
                 SpeechRecognizer.ERROR_RECOGNIZER_BUSY ->
                     listenAgain(delayMillis = 500)
@@ -430,7 +543,6 @@ class MainActivity : androidx.activity.ComponentActivity() {
             retryAfterUnrecognizedSpeech()
             return
         }
-        recognitionRetryCount = 0
         if (alternatives.any(::isRepeatCommand)) {
             beginPrompt()
             return
@@ -439,15 +551,8 @@ class MainActivity : androidx.activity.ComponentActivity() {
     }
 
     private fun retryAfterUnrecognizedSpeech() {
-        if (recognitionRetryCount < MAX_NO_MATCH_RETRIES) {
-            recognitionRetryCount++
-            updateState { copy(recognitionStatus = "Речь не распознана. Слушаю ещё раз...") }
-            listenAgain()
-        } else {
-            updateState {
-                copy(recognitionStatus = "Не удалось распознать перевод. Проверьте, что в Android включена служба распознавания речи и установлен английский (США) пакет, затем нажмите «Повторить».")
-            }
-        }
+        updateState { copy(recognitionStatus = "Речь не распознана. Слушаю ещё раз...") }
+        listenAgain()
     }
 
     private fun checkAnswer(alternatives: List<String>) {
@@ -484,13 +589,13 @@ class MainActivity : androidx.activity.ComponentActivity() {
                 )
             }
             speak(recognized, "en-US") {
-                speak(phrase.translation, "en-US") { startListening("en-US") }
+                speak(phrase.translation, "en-US") { startListening(uiState.selectedRecognitionLanguage) }
             }
         }
     }
 
     private fun listenAgain(delayMillis: Long = 250) {
-        mainHandler.postDelayed({ startListening("en-US") }, delayMillis)
+        mainHandler.postDelayed({ startListening(uiState.selectedRecognitionLanguage) }, delayMillis)
     }
 
     private fun recreateSpeechRecognizer() {
@@ -630,11 +735,11 @@ class MainActivity : androidx.activity.ComponentActivity() {
 
     companion object {
         private const val MAX_RECOGNITION_RESTARTS = 3
-        private const val MAX_NO_MATCH_RETRIES = 2
         private const val RECOGNITION_RESULT_TIMEOUT_MILLIS = 10_000L
         private const val PHRASES_KEY = "voicePractice.phrases"
         private const val RUSSIAN_VOICE_KEY = "voicePractice.russianVoice"
         private const val ENGLISH_VOICE_KEY = "voicePractice.englishVoice"
+        private const val RECOGNITION_LANGUAGE_KEY = "voicePractice.recognitionLanguage"
     }
 }
 
@@ -648,6 +753,7 @@ private fun VoicePracticeScreen(
     onSavePhrases: (String) -> Unit,
     onChooseRussianVoice: (String) -> Unit,
     onChooseEnglishVoice: (String) -> Unit,
+    onChooseRecognitionLanguage: (String) -> Unit,
 ) {
     var editorOpen by remember { mutableStateOf(false) }
     var editorContent by remember(state.sourceText) { mutableStateOf(state.sourceText) }
@@ -810,17 +916,24 @@ private fun VoicePracticeScreen(
                     }
                 }
                 VoicePicker(
-                    label = "Русская фраза",
+                    label = "Озвучивание исходной фразы",
                     voices = state.russianVoices,
                     selected = state.selectedRussianVoice,
                     onSelect = onChooseRussianVoice,
                 )
                 VoicePicker(
-                    label = "Английский перевод",
+                    label = "Озвучивание английского перевода",
                     voices = state.englishVoices,
                     selected = state.selectedEnglishVoice,
                     onSelect = onChooseEnglishVoice,
                 )
+                RecognitionLanguagePicker(
+                    languages = state.recognitionLanguages,
+                    selected = state.selectedRecognitionLanguage,
+                    enabled = !state.isActive,
+                    onSelect = onChooseRecognitionLanguage,
+                )
+                Text(state.recognitionLanguageStatus, color = Muted, fontSize = 11.sp, lineHeight = 16.sp)
                 Text(state.voiceStatus, color = Muted, fontSize = 11.sp, lineHeight = 16.sp)
             }
         }
@@ -902,4 +1015,49 @@ private fun VoicePicker(
             }
         }
     }
+}
+
+@Composable
+private fun RecognitionLanguagePicker(
+    languages: List<String>,
+    selected: String,
+    enabled: Boolean,
+    onSelect: (String) -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text("Язык распознавания перевода", color = Ink, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+        Box {
+            OutlinedButton(
+                onClick = { expanded = true },
+                modifier = Modifier.fillMaxWidth(),
+                enabled = enabled && languages.isNotEmpty(),
+            ) {
+                Text(
+                    text = recognitionLanguageLabel(selected),
+                    modifier = Modifier.fillMaxWidth(),
+                    textAlign = TextAlign.Start,
+                    maxLines = 1,
+                )
+            }
+            DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+                languages.forEach { language ->
+                    DropdownMenuItem(
+                        text = { Text(recognitionLanguageLabel(language)) },
+                        onClick = {
+                            onSelect(language)
+                            expanded = false
+                        },
+                    )
+                }
+            }
+        }
+    }
+}
+
+private fun recognitionLanguageLabel(languageTag: String): String {
+    val displayName = Locale.forLanguageTag(languageTag)
+        .getDisplayName(Locale("ru"))
+        .replaceFirstChar { if (it.isLowerCase()) it.titlecase(Locale("ru")) else it.toString() }
+    return "$displayName · $languageTag"
 }
