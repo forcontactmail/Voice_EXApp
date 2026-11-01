@@ -76,6 +76,17 @@ private val GreenDark = Color(0xFF105B49)
 private val Coral = Color(0xFFC85C47)
 private val Line = Color(0xFFDCE3DC)
 private const val DEFAULT_RECOGNITION_LANGUAGE = "en-US"
+private val COMMON_ENGLISH_RECOGNITION_LANGUAGES = listOf(
+    "en-US",
+    "en-GB",
+    "en-AU",
+    "en-CA",
+    "en-IN",
+    "en-IE",
+    "en-NZ",
+    "en-ZA",
+    "en-SG",
+)
 
 private data class AnswerReveal(val recognized: String, val expected: String)
 
@@ -204,7 +215,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
             .getString(RECOGNITION_LANGUAGE_KEY, DEFAULT_RECOGNITION_LANGUAGE)
             ?: DEFAULT_RECOGNITION_LANGUAGE
         uiState = uiState.copy(
-            recognitionLanguages = listOf(language),
+            recognitionLanguages = (COMMON_ENGLISH_RECOGNITION_LANGUAGES + language).distinct(),
             selectedRecognitionLanguage = language,
         )
     }
@@ -280,7 +291,8 @@ class MainActivity : androidx.activity.ComponentActivity() {
         val savedLanguage = getPreferences(MODE_PRIVATE)
             .getString(RECOGNITION_LANGUAGE_KEY, DEFAULT_RECOGNITION_LANGUAGE)
         val availableLanguages = (
-            languages.ifEmpty { listOf(DEFAULT_RECOGNITION_LANGUAGE) } +
+            COMMON_ENGLISH_RECOGNITION_LANGUAGES +
+                languages +
                 listOfNotNull(savedLanguage)
             ).distinct()
         val selectedLanguage = savedLanguage?.takeIf { it in availableLanguages }
@@ -292,11 +304,9 @@ class MainActivity : androidx.activity.ComponentActivity() {
                 recognitionLanguages = availableLanguages,
                 selectedRecognitionLanguage = selectedLanguage,
                 recognitionLanguageStatus = if (languages.isEmpty()) {
-                    "Служба не предоставила список языков. Используется английский (США); доступность зависит от службы распознавания."
-                } else if (availableLanguages.size == 1) {
-                    "Служба распознавания сообщает только один доступный вариант."
+                    "Выберите вариант английского. Доступность зависит от службы распознавания и установленных речевых пакетов Android."
                 } else {
-                    "Доступно языков распознавания: ${availableLanguages.size}."
+                    "Выберите вариант английского; поддержка выбранного языка зависит от службы распознавания Android."
                 },
             )
         }
@@ -306,6 +316,10 @@ class MainActivity : androidx.activity.ComponentActivity() {
         if (language !in uiState.recognitionLanguages) return
         getPreferences(MODE_PRIVATE).edit().putString(RECOGNITION_LANGUAGE_KEY, language).apply()
         updateState { copy(selectedRecognitionLanguage = language) }
+        if (uiState.isActive) {
+            cancelRecognition()
+            startListening(language)
+        }
     }
 
     private fun loadSavedPhrases() {
@@ -941,7 +955,7 @@ private fun VoicePracticeScreen(
                 RecognitionLanguagePicker(
                     languages = state.recognitionLanguages,
                     selected = state.selectedRecognitionLanguage,
-                    enabled = !state.isActive,
+                    enabled = true,
                     onSelect = onChooseRecognitionLanguage,
                 )
                 Text(state.recognitionLanguageStatus, color = Muted, fontSize = 11.sp, lineHeight = 16.sp)
