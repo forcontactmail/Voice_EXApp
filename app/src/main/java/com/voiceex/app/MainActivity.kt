@@ -117,8 +117,8 @@ class MainActivity : androidx.activity.ComponentActivity() {
     private var isListening = false
     private var awaitingRecognitionResult = false
     private var recognitionAttemptId = 0L
-    private var recognitionRestartAttempts = 0
     private var recognitionResultTimeout: Runnable? = null
+    private var pendingRecognitionRestart: Runnable? = null
     private var utteranceId: String? = null
     private var speechContinuation: (() -> Unit)? = null
 
@@ -422,7 +422,6 @@ class MainActivity : androidx.activity.ComponentActivity() {
         val phrase = uiState.phrases.getOrNull(uiState.currentIndex) ?: return
         cancelRecognition()
         cancelSpeech()
-        recognitionRestartAttempts = 0
         updateState {
             copy(
                 isActive = true,
@@ -456,15 +455,9 @@ class MainActivity : androidx.activity.ComponentActivity() {
             speechRecognizer?.startListening(intent)
         } catch (error: RuntimeException) {
             isListening = false
-            if (recognitionRestartAttempts < MAX_RECOGNITION_RESTARTS) {
-                recognitionRestartAttempts += 1
-                updateState { copy(recognitionStatus = "Служба речи занята. Повторно запускаю микрофон...") }
-                listenAgain(delayMillis = 500)
-            } else {
-                updateState {
-                    copy(recognitionStatus = "Не удалось запустить микрофон: ${error.message ?: "ошибка службы речи"}. Нажмите «Повторить».")
-                }
-            }
+            updateState { copy(recognitionStatus = "Не удалось запустить микрофон. Перезапускаю службу речи...") }
+            recreateSpeechRecognizer()
+            listenAgain(delayMillis = 1_000)
         }
     }
 
@@ -500,28 +493,23 @@ class MainActivity : androidx.activity.ComponentActivity() {
                 }
                 SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS ->
                     updateState { copy(recognitionStatus = "Разрешите приложению доступ к микрофону в настройках Android.") }
-                SpeechRecognizer.ERROR_NETWORK, SpeechRecognizer.ERROR_NETWORK_TIMEOUT ->
-                    updateState { copy(recognitionStatus = "Нет соединения со службой распознавания речи.") }
+                SpeechRecognizer.ERROR_NETWORK, SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> {
+                    updateState { copy(recognitionStatus = "Нет соединения со службой распознавания речи. Повторяю попытку...") }
+                    listenAgain(delayMillis = 2_000)
+                }
                 SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED, SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE ->
                     updateState {
                         copy(recognitionStatus = "Служба не поддерживает выбранный язык (${uiState.selectedRecognitionLanguage}). Выберите другой язык распознавания или установите его речевой пакет в Android.")
                     }
-                SpeechRecognizer.ERROR_RECOGNIZER_BUSY ->
+                SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> {
+                    updateState { copy(recognitionStatus = "Служба речи занята. Повторяю попытку...") }
                     listenAgain(delayMillis = 500)
-                SpeechRecognizer.ERROR_CLIENT, SpeechRecognizer.ERROR_SERVER -> {
-                    if (recognitionRestartAttempts < MAX_RECOGNITION_RESTARTS) {
-                        recognitionRestartAttempts += 1
-                        updateState { copy(recognitionStatus = "Служба речи прервала распознавание. Перезапускаю микрофон...") }
-                        recreateSpeechRecognizer()
-                        listenAgain(delayMillis = 500)
-                    } else {
-                        updateState {
-                            copy(recognitionStatus = "Служба распознавания речи не отвечает. Проверьте её настройки и нажмите «Повторить».")
-                        }
-                    }
                 }
-                else ->
-                    updateState { copy(recognitionStatus = "Ошибка распознавания речи (код $error). Попробуйте ещё раз.") }
+                else -> {
+                    updateState { copy(recognitionStatus = "Служба речи прервала распознавание (код $error). Перезапускаю микрофон...") }
+                    recreateSpeechRecognizer()
+                    listenAgain(delayMillis = 1_000)
+                }
             }
         }
 
@@ -557,8 +545,9 @@ class MainActivity : androidx.activity.ComponentActivity() {
             speechRecognizer?.cancel()
             recreateSpeechRecognizer()
             updateState {
-                copy(recognitionStatus = "Служба речи не вернула результат. Проверьте интернет и настройки распознавания речи, затем нажмите «Повторить».")
+                copy(recognitionStatus = "Служба речи не вернула результат. Перезапускаю прослушивание...")
             }
+            listenAgain(delayMillis = 500)
         }.also { mainHandler.postDelayed(it, RECOGNITION_RESULT_TIMEOUT_MILLIS) }
     }
 
@@ -620,7 +609,13 @@ class MainActivity : androidx.activity.ComponentActivity() {
     }
 
     private fun listenAgain(delayMillis: Long = 250) {
-        mainHandler.postDelayed({ startListening(uiState.selectedRecognitionLanguage) }, delayMillis)
+        pendingRecognitionRestart?.let(mainHandler::removeCallbacks)
+        pendingRecognitionRestart = Runnable {
+            pendingRecognitionRestart = null
+            if (uiState.isActive && !isListening && !awaitingRecognitionResult) {
+                startListening(uiState.selectedRecognitionLanguage)
+            }
+        }.also { mainHandler.postDelayed(it, delayMillis) }
     }
 
     private fun recreateSpeechRecognizer() {
@@ -666,6 +661,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
     private fun cancelRecognition() {
         mainHandler.removeCallbacksAndMessages(null)
         recognitionResultTimeout = null
+        pendingRecognitionRestart = null
         recognitionAttemptId++
         if (isListening || awaitingRecognitionResult) speechRecognizer?.cancel()
         isListening = false
@@ -759,7 +755,6 @@ class MainActivity : androidx.activity.ComponentActivity() {
     }
 
     companion object {
-        private const val MAX_RECOGNITION_RESTARTS = 3
         private const val RECOGNITION_RESULT_TIMEOUT_MILLIS = 10_000L
         private const val PHRASES_KEY = "voicePractice.phrases"
         private const val RUSSIAN_VOICE_KEY = "voicePractice.russianVoice"
