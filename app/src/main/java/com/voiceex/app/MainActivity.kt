@@ -90,10 +90,11 @@ private data class PracticeUiState(
 )
 
 private enum class RecognitionWait(val millis: Int, val label: String) {
-    TWO_SECONDS(2_000, "2 секунды"),
-    THREE_SECONDS(3_000, "3 секунды"),
-    FOUR_SECONDS(4_000, "4 секунды"),
-    FIVE_SECONDS(5_000, "5 секунд"),
+    ONE_SECOND(1_000, "1"),
+    TWO_SECONDS(2_000, "2"),
+    THREE_SECONDS(3_000, "3"),
+    FOUR_SECONDS(4_000, "4"),
+    FIVE_SECONDS(5_000, "5"),
 }
 
 class MainActivity : androidx.activity.ComponentActivity() {
@@ -834,7 +835,7 @@ private fun RecognitionWaitPicker(
 ) {
     var expanded by remember { mutableStateOf(false) }
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Text("Ожидание перевода", color = Ink, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+        Text("Ожидание перевода, с", color = Ink, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
         Box {
             OutlinedButton(
                 onClick = { expanded = true },
