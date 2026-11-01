@@ -1,5 +1,80 @@
-Доброе утро. | Good morning.
-Как вас зовут? | What is your name?
-Я хотел бы чашку кофе. | I would like a cup of coffee.
-Где находится ближайшая станция? | Where is the nearest station?
-Не могли бы вы говорить медленнее? | Could you speak more slowly?
+Время летит незаметно. | Time flies.
+Время летит незаметно, когда тебе весело. | Time flies when you're having fun.
+Я найду тебя и спасу. | I will find you guys and rescue you guys.
+Я собираюсь найти тебя и спасти. | I am going to find you and rescue you.
+Поступки говорят громче слов! | Actions speak louder than words!
+Земля вращается вокруг Солнца. | The Earth goes around the Sun.
+Я обычно встаю в 7 часов утра. | I usually get up at 7 o'clock in the morning.
+Магазины закрываются в 6 вечера. | The shops close at 6 p.m.
+Вода кипит при 100 градусах Цельсия. | Water boils at 100 degrees Celsius.
+Мой брат живет в Лондоне. | My brother lives in London.
+Она не часто пьет кофе. | She doesn't drink coffee very often.
+Что означает это слово? | What does this word mean?
+Пожалуйста, не шумите, я работаю. | Please be quiet, I'm working.
+Где Том? Он принимает душ. | Where's Tom? He's taking a shower.
+Посмотри, идет дождь! | Look, it's raining!
+Почему ты на меня смотришь? | Why are you looking at me?
+Погода меняется в лучшую сторону. | The weather is changing for the better.
+Я сейчас читаю интересную книгу. | I am reading an interesting book right now.
+Население мира растет очень быстро. | The population of the world is rising very fast.
+Я потерял свой ключ. Ты его видел? | I've lost my key. Have you seen it?
+Она уехала в Париж. | She has gone to Paris.
+Они только что пообедали. | They have just had lunch.
+Я уже прочитал эту газету. | I have already read this newspaper.
+Она еще не пришла. | She hasn't arrived yet.
+Вы когда-нибудь были в Нью-Йорке? | Have you ever been to New York?
+Это лучший фильм, который я когда-либо видел. | It's the best movie I've ever seen.
+Дождь идет с самого утра. | It has been raining since early morning.
+Ты выглядишь усталым. Ты много работал? | You look tired. Have you been working hard?
+Я учу английский уже три года. | I have been learning English for three years.
+Как долго вы здесь ждете? | How long have you been waiting here?
+Он пишет эту книгу уже несколько месяцев. | He has been writing this book for several months.
+Мы вчера посмотрели отличный фильм. | We watched an excellent movie yesterday.
+Она проснулась рано и позавтракала. | She woke up early and had breakfast.
+Они не пришли на вечеринку в прошлую субботу. | They didn't come to the party last Saturday.
+Где ты купил эту куртку? | Where did you buy this jacket?
+Я жил в Чикаго, когда был ребенком. | I lived in Chicago when I was a child.
+Сражение произошло в 1812 году. | The battle took place in 1812.
+Когда я вышел из дома, шел дождь. | When I left home, it was raining.
+Что ты делал вчера в 10 вечера? | What were you doing at 10 p.m. yesterday?
+Она читала книгу, пока он готовил ужин. | She was reading a book while he was cooking dinner.
+Мы встретили Тома, когда шли по улице. | We met Tom while we were walking down the street.
+Телефон зазвонил, когда я принимал ванну. | The phone rang while I was taking a bath.
+Когда мы пришли на станцию, поезд уже ушел. | When we arrived at the station, the train had already left.
+Я не был голоден, потому что только что поел. | I wasn't hungry because I had just eaten.
+Она сказала, что никогда не видела его раньше. | She said she had never seen him before.
+Дом был очень тихим, все легли спать. | The house was very quiet, everyone had gone to bed.
+Мы ждали два часа, прежде чем приехал автобус. | We had been waiting for two hours before the bus arrived.
+Она устала, потому что весь день работала на ногах. | She was tired because she had been working on her feet all day.
+Земля была мокрой, так как шел дождь. | The ground was wet because it had been raining.
+Я думаю, завтра погода будет хорошей. | I think the weather will be nice tomorrow.
+Я перезвоню тебе позже. | I will call you back later.
+Не волнуйся, я помогу тебе с этим. | Don't worry, I'll help you with that.
+Она, вероятно, придет на праздник. | She will probably come to the party.
+Я не думаю, что экзамен будет сложным. | I don't think the exam will be difficult.
+Завтра в это время я буду лететь в Париж. | This time tomorrow I will be flying to Paris.
+Не звони мне в 9, я буду смотреть матч. | Don't call me at 9, I'll be watching the match.
+Они будут сдавать экзамен завтра утром. | They will be taking their exam tomorrow morning.
+Я закончу отчет к следующей пятнице. | I will have finished the report by next Friday.
+К концу года он проработает здесь 10 лет. | By the end of the year, he will have been working here for 10 years.
+Этот дом был построен в 1961 году. | This house was built in 1961.
+Офис убирают каждый день. | The office is cleaned every day.
+Дорогу сейчас ремонтируют. | The road is being repaired right now.
+Письмо уже было отправлено, когда он позвонил. | The letter had already been sent when he called.
+Тебе сообщат о результатах завтра. | You will be informed about the results tomorrow.
+Если пойдет дождь, мы останемся дома. | If it rains, we will stay at home.
+Если бы у меня было много денег, я бы путешествовал вокруг света. | If I had a lot of money, I would travel around the world.
+Если бы я знал об этом вчера, я бы помог тебе. | If I had known about it yesterday, I would have helped you.
+Если нагреть воду до 100 градусов, она закипит. | If you heat water to 100 degrees, it boils.
+Я бы хотел, чтобы сейчас было лето. | I wish it were summer now.
+Жаль, что я не купил тот билет. | I wish I had bought that ticket.
+Тебе следовало послушать моего совета. | You should have listened to my advice.
+Должно быть, она забыла ключи дома. | She must have forgotten her keys at home.
+Он не мог сказать такую глупость. | He couldn't have said such a stupid thing.
+Мы могли бы выиграть матч, но нам не повезло. | We could have won the match, but we were unlucky.
+Я с нетерпением жду встречи с вами. | I am looking forward to meeting you.
+Я помню, как запер дверь. | I remember locking the door.
+Не забудь запереть дверь. | Remember to lock the door.
+Я подстригся вчера. | I had my hair cut yesterday.
+Она заставила его переделать всю работу. | She made him redo all the work.
+У меня нет времени ходить по магазинам. | I don't have time to go shopping.
