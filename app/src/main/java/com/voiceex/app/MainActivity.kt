@@ -103,6 +103,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
     private var speechRecognizer: SpeechRecognizer? = null
     private var textToSpeech: TextToSpeech? = null
     private var isListening = false
+    private var recognitionRestartAttempts = 0
     private var utteranceId: String? = null
     private var speechContinuation: (() -> Unit)? = null
 
@@ -148,15 +149,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
     }
 
     private fun initializeSpeech() {
-        if (SpeechRecognizer.isRecognitionAvailable(this)) {
-            speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this).also { recognizer ->
-                recognizer.setRecognitionListener(recognitionListener)
-            }
-        } else {
-            updateState {
-                copy(recognitionStatus = "На устройстве не найден сервис распознавания речи. Установите или включите службу речи в Android.")
-            }
-        }
+        ensureSpeechRecognizer()
 
         textToSpeech = TextToSpeech(this) { result ->
             if (result == TextToSpeech.SUCCESS) {
@@ -174,6 +167,33 @@ class MainActivity : androidx.activity.ComponentActivity() {
             } else {
                 updateState { copy(voiceStatus = "Синтез речи недоступен. Установите службу Text-to-Speech в Android.") }
             }
+        }
+    }
+
+    private fun ensureSpeechRecognizer(): Boolean {
+        if (speechRecognizer != null) return true
+        if (!SpeechRecognizer.isRecognitionAvailable(this)) {
+            updateState {
+                copy(
+                    isActive = false,
+                    recognitionStatus = "Не найдена служба распознавания речи. Установите или включите приложение распознавания речи в Android.",
+                )
+            }
+            return false
+        }
+        return try {
+            speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this).also { recognizer ->
+                recognizer.setRecognitionListener(recognitionListener)
+            }
+            true
+        } catch (error: RuntimeException) {
+            updateState {
+                copy(
+                    isActive = false,
+                    recognitionStatus = "Не удалось подключиться к службе распознавания речи: ${error.message ?: "ошибка службы"}.",
+                )
+            }
+            false
         }
     }
 
@@ -256,10 +276,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
     }
 
     private fun requestMicrophoneAndStart() {
-        if (speechRecognizer == null) {
-            updateState { copy(recognitionStatus = "Распознавание речи недоступно на этом устройстве.") }
-            return
-        }
+        if (!ensureSpeechRecognizer()) return
         if (uiState.currentIndex >= uiState.phrases.size) {
             updateState {
                 copy(
@@ -292,7 +309,8 @@ class MainActivity : androidx.activity.ComponentActivity() {
     }
 
     private fun startListening(language: String) {
-        if (!uiState.isActive || speechRecognizer == null) return
+        if (!uiState.isActive) return
+        if (!ensureSpeechRecognizer()) return
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             updateState { copy(recognitionStatus = "Нет разрешения на использование микрофона.") }
             return
@@ -307,24 +325,37 @@ class MainActivity : androidx.activity.ComponentActivity() {
         }
         try {
             isListening = true
+            updateState { copy(recognitionStatus = "Запускаю распознавание речи...") }
             speechRecognizer?.startListening(intent)
-            updateState { copy(recognitionStatus = "Слушаю перевод по-английски...") }
         } catch (error: RuntimeException) {
             isListening = false
-            updateState { copy(recognitionStatus = "Не удалось запустить микрофон: ${error.message ?: "ошибка службы речи"}.") }
+            if (recognitionRestartAttempts < MAX_RECOGNITION_RESTARTS) {
+                recognitionRestartAttempts += 1
+                updateState { copy(recognitionStatus = "Служба речи занята. Повторно запускаю микрофон...") }
+                listenAgain(delayMillis = 500)
+            } else {
+                updateState {
+                    copy(recognitionStatus = "Не удалось запустить микрофон: ${error.message ?: "ошибка службы речи"}. Нажмите «Повторить».")
+                }
+            }
         }
     }
 
     private val recognitionListener = object : RecognitionListener {
         override fun onReadyForSpeech(params: Bundle?) {
             isListening = true
+            recognitionRestartAttempts = 0
+            updateState { copy(recognitionStatus = "Слушаю перевод по-английски...") }
         }
 
-        override fun onBeginningOfSpeech() = Unit
+        override fun onBeginningOfSpeech() {
+            updateState { copy(recognitionStatus = "Речь обнаружена, распознаю перевод...") }
+        }
         override fun onRmsChanged(rmsdB: Float) = Unit
         override fun onBufferReceived(buffer: ByteArray?) = Unit
         override fun onEndOfSpeech() {
             isListening = false
+            if (uiState.isActive) updateState { copy(recognitionStatus = "Обрабатываю перевод...") }
         }
 
         override fun onError(error: Int) {
@@ -343,6 +374,18 @@ class MainActivity : androidx.activity.ComponentActivity() {
                     updateState { copy(recognitionStatus = "Нет соединения со службой распознавания речи.") }
                 SpeechRecognizer.ERROR_RECOGNIZER_BUSY ->
                     listenAgain(delayMillis = 500)
+                SpeechRecognizer.ERROR_CLIENT, SpeechRecognizer.ERROR_SERVER -> {
+                    if (recognitionRestartAttempts < MAX_RECOGNITION_RESTARTS) {
+                        recognitionRestartAttempts += 1
+                        updateState { copy(recognitionStatus = "Служба речи прервала распознавание. Перезапускаю микрофон...") }
+                        recreateSpeechRecognizer()
+                        listenAgain(delayMillis = 500)
+                    } else {
+                        updateState {
+                            copy(recognitionStatus = "Служба распознавания речи не отвечает. Проверьте её настройки и нажмите «Повторить».")
+                        }
+                    }
+                }
                 else ->
                     updateState { copy(recognitionStatus = "Ошибка распознавания речи (код $error). Попробуйте ещё раз.") }
             }
@@ -415,6 +458,12 @@ class MainActivity : androidx.activity.ComponentActivity() {
 
     private fun listenAgain(delayMillis: Long = 250) {
         mainHandler.postDelayed({ startListening("en-US") }, delayMillis)
+    }
+
+    private fun recreateSpeechRecognizer() {
+        speechRecognizer?.destroy()
+        speechRecognizer = null
+        ensureSpeechRecognizer()
     }
 
     private fun speak(text: String, language: String, onFinished: (() -> Unit)? = null) {
@@ -544,6 +593,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
     }
 
     companion object {
+        private const val MAX_RECOGNITION_RESTARTS = 3
         private const val PHRASES_KEY = "voicePractice.phrases"
         private const val RUSSIAN_VOICE_KEY = "voicePractice.russianVoice"
         private const val ENGLISH_VOICE_KEY = "voicePractice.englishVoice"
