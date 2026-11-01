@@ -85,17 +85,8 @@ private data class PracticeUiState(
     val englishVoices: List<String> = emptyList(),
     val selectedRussianVoice: String = "",
     val selectedEnglishVoice: String = "",
-    val recognitionWait: RecognitionWait = RecognitionWait.TWO_SECONDS,
     val voiceStatus: String = "Голоса загружаются...",
 )
-
-private enum class RecognitionWait(val millis: Int, val label: String) {
-    ONE_SECOND(1_000, "1"),
-    TWO_SECONDS(2_000, "2"),
-    THREE_SECONDS(3_000, "3"),
-    FOUR_SECONDS(4_000, "4"),
-    FIVE_SECONDS(5_000, "5"),
-}
 
 class MainActivity : androidx.activity.ComponentActivity() {
     private var uiState by mutableStateOf(PracticeUiState())
@@ -122,7 +113,6 @@ class MainActivity : androidx.activity.ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        loadRecognitionWait()
         initializeSpeech()
         loadSavedPhrases()
         setContent {
@@ -145,7 +135,6 @@ class MainActivity : androidx.activity.ComponentActivity() {
                         onSavePhrases = ::savePhrases,
                         onChooseRussianVoice = { saveVoice("russianVoice", it, true) },
                         onChooseEnglishVoice = { saveVoice("englishVoice", it, false) },
-                        onChooseRecognitionWait = ::saveRecognitionWait,
                     )
                 }
             }
@@ -235,7 +224,13 @@ class MainActivity : androidx.activity.ComponentActivity() {
         val engine = textToSpeech ?: return
         val voices = engine.voices.orEmpty()
         val russian = voices.filter { it.locale.language == "ru" }
-        val english = voices.filter { it.locale.language == "en" }
+        val english = voices
+            .filter { it.locale.language == "en" && it.locale.country == "US" }
+            .sortedWith(compareBy<android.speech.tts.Voice> { it.isNetworkConnectionRequired }.thenByDescending { it.quality })
+            .take(1)
+            .ifEmpty {
+                voices.filter { it.locale.language == "en" }.take(1)
+            }
         val preferences = getPreferences(MODE_PRIVATE)
         val savedRussian = preferences.getString(RUSSIAN_VOICE_KEY, null)
         val savedEnglish = preferences.getString(ENGLISH_VOICE_KEY, null)
@@ -264,17 +259,6 @@ class MainActivity : androidx.activity.ComponentActivity() {
             if (russian) copy(selectedRussianVoice = name, voiceStatus = "Выбор русского голоса сохранён.")
             else copy(selectedEnglishVoice = name, voiceStatus = "Выбор английского голоса сохранён.")
         }
-    }
-
-    private fun loadRecognitionWait() {
-        val savedMillis = getPreferences(MODE_PRIVATE).getInt(RECOGNITION_WAIT_KEY, RecognitionWait.TWO_SECONDS.millis)
-        val savedWait = RecognitionWait.entries.firstOrNull { it.millis == savedMillis } ?: RecognitionWait.TWO_SECONDS
-        uiState = uiState.copy(recognitionWait = savedWait)
-    }
-
-    private fun saveRecognitionWait(wait: RecognitionWait) {
-        getPreferences(MODE_PRIVATE).edit().putInt(RECOGNITION_WAIT_KEY, wait.millis).apply()
-        updateState { copy(recognitionWait = wait) }
     }
 
     private fun requestMicrophoneAndStart() {
@@ -323,9 +307,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, language)
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 5)
-            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, uiState.recognitionWait.millis)
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, uiState.recognitionWait.millis)
+            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
         }
         try {
             val attemptId = ++recognitionAttemptId
@@ -382,6 +364,10 @@ class MainActivity : androidx.activity.ComponentActivity() {
                     updateState { copy(recognitionStatus = "Разрешите приложению доступ к микрофону в настройках Android.") }
                 SpeechRecognizer.ERROR_NETWORK, SpeechRecognizer.ERROR_NETWORK_TIMEOUT ->
                     updateState { copy(recognitionStatus = "Нет соединения со службой распознавания речи.") }
+                SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED, SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE ->
+                    updateState {
+                        copy(recognitionStatus = "Служба не поддерживает английский (США). Установите английский речевой пакет или выберите другую службу распознавания в Android.")
+                    }
                 SpeechRecognizer.ERROR_RECOGNIZER_BUSY ->
                     listenAgain(delayMillis = 500)
                 SpeechRecognizer.ERROR_CLIENT, SpeechRecognizer.ERROR_SERVER -> {
@@ -411,23 +397,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
             handleRecognition(alternatives)
         }
 
-        override fun onPartialResults(partialResults: Bundle?) {
-            if (attemptId != recognitionAttemptId || !uiState.isActive) return
-            val alternatives = partialResults
-                ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                .orEmpty()
-            val expected = uiState.phrases.getOrNull(uiState.currentIndex)
-                ?.translation
-                ?.let(::normalizeSpeech)
-            if (expected != null && alternatives.any { normalizeSpeech(it) == expected }) {
-                finishRecognitionAttempt(attemptId)
-                isListening = false
-                awaitingRecognitionResult = false
-                recognitionRetryCount = 0
-                speechRecognizer?.cancel()
-                handleRecognition(alternatives)
-            }
-        }
+        override fun onPartialResults(partialResults: Bundle?) = Unit
         override fun onEvent(eventType: Int, params: Bundle?) = Unit
     }
 
@@ -475,7 +445,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
             listenAgain()
         } else {
             updateState {
-                copy(recognitionStatus = "Не удалось распознать речь. Проверьте язык и службу распознавания, затем нажмите «Повторить».")
+                copy(recognitionStatus = "Не удалось распознать перевод. Проверьте, что в Android включена служба распознавания речи и установлен английский (США) пакет, затем нажмите «Повторить».")
             }
         }
     }
@@ -665,7 +635,6 @@ class MainActivity : androidx.activity.ComponentActivity() {
         private const val PHRASES_KEY = "voicePractice.phrases"
         private const val RUSSIAN_VOICE_KEY = "voicePractice.russianVoice"
         private const val ENGLISH_VOICE_KEY = "voicePractice.englishVoice"
-        private const val RECOGNITION_WAIT_KEY = "voicePractice.recognitionWait"
     }
 }
 
@@ -679,7 +648,6 @@ private fun VoicePracticeScreen(
     onSavePhrases: (String) -> Unit,
     onChooseRussianVoice: (String) -> Unit,
     onChooseEnglishVoice: (String) -> Unit,
-    onChooseRecognitionWait: (RecognitionWait) -> Unit,
 ) {
     var editorOpen by remember { mutableStateOf(false) }
     var editorContent by remember(state.sourceText) { mutableStateOf(state.sourceText) }
@@ -853,16 +821,6 @@ private fun VoicePracticeScreen(
                     selected = state.selectedEnglishVoice,
                     onSelect = onChooseEnglishVoice,
                 )
-                RecognitionWaitPicker(
-                    selected = state.recognitionWait,
-                    onSelect = onChooseRecognitionWait,
-                )
-                Text(
-                    "Если служба речи завершает ответ слишком рано, увеличьте время ожидания. Настройка применяется при следующем запуске распознавания.",
-                    color = Muted,
-                    fontSize = 11.sp,
-                    lineHeight = 16.sp,
-                )
                 Text(state.voiceStatus, color = Muted, fontSize = 11.sp, lineHeight = 16.sp)
             }
         }
@@ -937,40 +895,6 @@ private fun VoicePicker(
                         text = { Text(voice) },
                         onClick = {
                             onSelect(voice)
-                            expanded = false
-                        },
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun RecognitionWaitPicker(
-    selected: RecognitionWait,
-    onSelect: (RecognitionWait) -> Unit,
-) {
-    var expanded by remember { mutableStateOf(false) }
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Text("Ожидание перевода, с", color = Ink, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-        Box {
-            OutlinedButton(
-                onClick = { expanded = true },
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text(
-                    text = selected.label,
-                    modifier = Modifier.fillMaxWidth(),
-                    textAlign = TextAlign.Start,
-                )
-            }
-            DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-                RecognitionWait.entries.forEach { wait ->
-                    DropdownMenuItem(
-                        text = { Text(wait.label) },
-                        onClick = {
-                            onSelect(wait)
                             expanded = false
                         },
                     )
