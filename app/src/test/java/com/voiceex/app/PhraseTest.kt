@@ -35,11 +35,23 @@ class PhraseTest {
     }
 
     @Test
+    fun answerComparisonIgnoresOptionalOClock() {
+        assertEquals(
+            normalizeAnswer("Don't call me at nine"),
+            normalizeAnswer("Don't call me at nine o'clock"),
+        )
+        assertEquals("don't call me at nine o'clock", normalizeSpeech("Don't call me at nine o'clock"))
+    }
+
+    @Test
     fun detectsRatingCommand() {
         assertTrue(isRatingCommand("Rating"))
         assertTrue(isRatingCommand("Rating."))
+        assertTrue(isRatingCommand("What is my rating?"))
+        assertTrue(isRatingCommand("Show me my rating"))
+        assertTrue(isRatingCommand("What's my rating"))
         assertFalse(isRatingCommand("Raiting"))
-        assertFalse(isRatingCommand("My rating"))
+        assertFalse(isRatingCommand("The rating is excellent"))
     }
 
     @Test
@@ -63,6 +75,16 @@ class PhraseTest {
         assertEquals(67, rating.percentage)
 
         assertEquals(0, FirstTryRating().percentage)
+    }
+
+    @Test
+    fun answerCheckDelayUsesHalfSecondStepsWithinRange() {
+        assertEquals(0L, answerCheckDelayMillis(0))
+        assertEquals(500L, answerCheckDelayMillis(1))
+        assertEquals(2_500L, answerCheckDelayMillis(5))
+        assertEquals(5_000L, answerCheckDelayMillis(10))
+        assertEquals(0L, answerCheckDelayMillis(-1))
+        assertEquals(5_000L, answerCheckDelayMillis(11))
     }
 
     @Test

@@ -47,6 +47,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -67,6 +68,7 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import java.util.Locale
 import java.util.UUID
+import kotlin.math.roundToInt
 
 private val Paper = Color(0xFFF4F6F1)
 private val Ink = Color(0xFF1C2926)
@@ -76,6 +78,9 @@ private val GreenDark = Color(0xFF105B49)
 private val Coral = Color(0xFFC85C47)
 private val Line = Color(0xFFDCE3DC)
 private const val DEFAULT_RECOGNITION_LANGUAGE = "en-US"
+private const val MAX_ANSWER_CHECK_DELAY_HALF_SECONDS = 10
+private const val ANSWER_CHECK_DELAY_STEP_MILLIS = 500L
+private const val DEFAULT_ANSWER_CHECK_DELAY_HALF_SECONDS = 0
 private val COMMON_ENGLISH_RECOGNITION_LANGUAGES = listOf(
     "en-US",
     "en-GB",
@@ -108,6 +113,7 @@ private data class PracticeUiState(
     val selectedRecognitionLanguage: String = DEFAULT_RECOGNITION_LANGUAGE,
     val recognitionLanguageStatus: String = "Loading recognition languages...",
     val voiceStatus: String = "Loading voices...",
+    val answerCheckDelayHalfSeconds: Int = DEFAULT_ANSWER_CHECK_DELAY_HALF_SECONDS,
 )
 
 class MainActivity : androidx.activity.ComponentActivity() {
@@ -120,6 +126,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
     private var recognitionAttemptId = 0L
     private var recognitionResultTimeout: Runnable? = null
     private var pendingRecognitionRestart: Runnable? = null
+    private var pendingAnswerCheck: Runnable? = null
     private var utteranceId: String? = null
     private var speechContinuation: (() -> Unit)? = null
     private var practiceServiceStarted = false
@@ -135,6 +142,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        loadSavedAnswerCheckDelay()
         loadSavedRecognitionLanguage()
         initializeSpeech()
         loadSavedPhrases()
@@ -158,6 +166,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
                         onChooseRussianVoice = { saveVoice(it, true) },
                         onChooseEnglishVoice = { saveVoice(it, false) },
                         onChooseRecognitionLanguage = ::saveRecognitionLanguage,
+                        onAnswerCheckDelayChange = ::saveAnswerCheckDelay,
                     )
                 }
             }
@@ -219,6 +228,19 @@ class MainActivity : androidx.activity.ComponentActivity() {
             recognitionLanguages = (COMMON_ENGLISH_RECOGNITION_LANGUAGES + language).distinct(),
             selectedRecognitionLanguage = language,
         )
+    }
+
+    private fun loadSavedAnswerCheckDelay() {
+        val savedSteps = getPreferences(MODE_PRIVATE)
+            .getInt(ANSWER_CHECK_DELAY_KEY, DEFAULT_ANSWER_CHECK_DELAY_HALF_SECONDS)
+            .coerceIn(0, MAX_ANSWER_CHECK_DELAY_HALF_SECONDS)
+        uiState = uiState.copy(answerCheckDelayHalfSeconds = savedSteps)
+    }
+
+    private fun saveAnswerCheckDelay(halfSeconds: Int) {
+        val boundedSteps = halfSeconds.coerceIn(0, MAX_ANSWER_CHECK_DELAY_HALF_SECONDS)
+        getPreferences(MODE_PRIVATE).edit().putInt(ANSWER_CHECK_DELAY_KEY, boundedSteps).apply()
+        updateState { copy(answerCheckDelayHalfSeconds = boundedSteps) }
     }
 
     private fun loadRecognitionLanguages() {
@@ -619,7 +641,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
             }
             null -> Unit
         }
-        checkAnswer(alternatives)
+        checkAnswerAfterDelay(alternatives)
     }
 
     private fun skipQuestion() {
@@ -648,6 +670,23 @@ class MainActivity : androidx.activity.ComponentActivity() {
     private fun retryAfterUnrecognizedSpeech() {
         updateState { copy(recognitionStatus = "Speech not recognized. Listening again...") }
         listenAgain()
+    }
+
+    private fun checkAnswerAfterDelay(alternatives: List<String>) {
+        val delayMillis = answerCheckDelayMillis(uiState.answerCheckDelayHalfSeconds)
+        if (delayMillis == 0L) {
+            checkAnswer(alternatives)
+            return
+        }
+
+        val phraseIndex = uiState.currentIndex
+        updateState { copy(recognitionStatus = "Waiting before checking the translation...") }
+        pendingAnswerCheck = Runnable {
+            pendingAnswerCheck = null
+            if (uiState.isActive && uiState.currentIndex == phraseIndex) {
+                checkAnswer(alternatives)
+            }
+        }.also { mainHandler.postDelayed(it, delayMillis) }
     }
 
     private fun reportRating() {
@@ -680,8 +719,8 @@ class MainActivity : androidx.activity.ComponentActivity() {
 
     private fun checkAnswer(alternatives: List<String>) {
         val phrase = uiState.phrases.getOrNull(uiState.currentIndex) ?: return
-        val correct = normalizeSpeech(phrase.translation)
-        if (alternatives.any { normalizeSpeech(it) == correct }) {
+        val correct = normalizeAnswer(phrase.translation)
+        if (alternatives.any { normalizeAnswer(it) == correct }) {
             updateState {
                 copy(
                     feedback = "Correct.",
@@ -777,6 +816,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
         mainHandler.removeCallbacksAndMessages(null)
         recognitionResultTimeout = null
         pendingRecognitionRestart = null
+        pendingAnswerCheck = null
         recognitionAttemptId++
         if (isListening || awaitingRecognitionResult) speechRecognizer?.cancel()
         isListening = false
@@ -914,6 +954,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
         private const val LEGACY_RUSSIAN_VOICE_KEY = "russianVoice"
         private const val LEGACY_ENGLISH_VOICE_KEY = "englishVoice"
         private const val RECOGNITION_LANGUAGE_KEY = "voicePractice.recognitionLanguage"
+        private const val ANSWER_CHECK_DELAY_KEY = "voicePractice.answerCheckDelayHalfSeconds"
     }
 }
 
@@ -927,6 +968,7 @@ private fun VoicePracticeScreen(
     onChooseRussianVoice: (String) -> Unit,
     onChooseEnglishVoice: (String) -> Unit,
     onChooseRecognitionLanguage: (String) -> Unit,
+    onAnswerCheckDelayChange: (Int) -> Unit,
 ) {
     var editorOpen by remember { mutableStateOf(false) }
     var editorContent by remember(state.sourceText) { mutableStateOf(state.sourceText) }
@@ -1053,6 +1095,47 @@ private fun VoicePracticeScreen(
                     Text(state.voiceStatus, color = Muted, fontSize = 11.sp, lineHeight = 16.sp)
                 }
             }
+            Card(
+                colors = CardDefaults.cardColors(containerColor = Color.White),
+                shape = RoundedCornerShape(18.dp),
+            ) {
+                Column(
+                    modifier = Modifier.padding(20.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Kicker("PRACTICE")
+                    Text("Answer checking", color = Ink, fontSize = 22.sp, fontFamily = FontFamily.Serif)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text("Delay before checking", color = Ink, fontSize = 13.sp)
+                        Text(
+                            text = String.format(
+                                Locale.US,
+                                "%.1f sec",
+                                state.answerCheckDelayHalfSeconds / 2f,
+                            ),
+                            color = GreenDark,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                    }
+                    Slider(
+                        value = state.answerCheckDelayHalfSeconds.toFloat(),
+                        onValueChange = { onAnswerCheckDelayChange(it.roundToInt()) },
+                        valueRange = 0f..MAX_ANSWER_CHECK_DELAY_HALF_SECONDS.toFloat(),
+                        steps = MAX_ANSWER_CHECK_DELAY_HALF_SECONDS - 1,
+                    )
+                    Text(
+                        "Choose 0–5 seconds in 0.5-second steps. The setting is saved on this device.",
+                        color = Muted,
+                        fontSize = 11.sp,
+                        lineHeight = 16.sp,
+                    )
+                }
+            }
             Text(
                 "Phrase lists and voice settings are stored on this device. Speech recognition depends on the Android speech service and may require an internet connection.",
                 modifier = Modifier.padding(horizontal = 2.dp, vertical = 4.dp),
@@ -1176,6 +1259,9 @@ private fun VoicePracticeScreen(
         )
     }
 }
+
+internal fun answerCheckDelayMillis(halfSecondSteps: Int): Long =
+    halfSecondSteps.coerceIn(0, MAX_ANSWER_CHECK_DELAY_HALF_SECONDS) * ANSWER_CHECK_DELAY_STEP_MILLIS
 
 @Composable
 private fun Kicker(text: String) {

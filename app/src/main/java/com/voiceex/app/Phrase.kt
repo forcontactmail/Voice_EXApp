@@ -62,6 +62,12 @@ fun normalizeSpeech(value: String): String =
         .trim()
         .replace(Regex("\\s+"), " ")
 
+fun normalizeAnswer(value: String): String =
+    normalizeSpeech(value)
+        .split(" ")
+        .filterNot { it == "o'clock" }
+        .joinToString(" ")
+
 fun isRepeatCommand(value: String): Boolean =
     normalizeSpeech(value) in setOf(
         "повтори фразу",
@@ -78,8 +84,14 @@ fun isSkipCommand(value: String): Boolean =
         "skip",
     )
 
+private val ratingCommandWords = setOf("rating", "my", "the", "what", "what's", "is", "show", "me", "tell", "please")
+
 fun isRatingCommand(value: String): Boolean =
-    normalizeSpeech(value) == "rating"
+    normalizeSpeech(value).split(" ").let { words ->
+        "rating" in words &&
+            words.size <= 5 &&
+            words.all { it in ratingCommandWords }
+    }
 
 fun isClearRatingCommand(value: String): Boolean =
     normalizeSpeech(value) == "clear rating"
