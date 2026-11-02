@@ -1172,7 +1172,18 @@ private fun VoicePracticeScreen(
                         val progress = state.phrases.size.takeIf { it > 0 }?.let {
                             "${(state.currentIndex + 1).coerceAtMost(it)} of $it"
                         } ?: "No phrases"
-                        Text(progress, color = Muted, fontSize = 12.sp)
+                        Column(
+                            horizontalAlignment = Alignment.End,
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            Text(progress, color = Muted, fontSize = 12.sp)
+                            Text(
+                                "Rating: ${state.firstTryRating.percentage}%",
+                                color = GreenDark,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                        }
                     }
                     LinearProgressIndicator(
                         progress = if (state.phrases.isEmpty()) 0f else {
