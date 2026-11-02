@@ -5,7 +5,6 @@ import android.app.Activity
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -122,16 +121,6 @@ class MainActivity : androidx.activity.ComponentActivity() {
     private var utteranceId: String? = null
     private var speechContinuation: (() -> Unit)? = null
     private var practiceServiceStarted = false
-    private var practicePausedForLock = false
-
-    private val screenLockReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context?, intent: Intent?) {
-            when (intent?.action) {
-                Intent.ACTION_SCREEN_OFF -> pausePracticeForLock()
-                Intent.ACTION_USER_PRESENT -> resumePracticeAfterUnlock()
-            }
-        }
-    }
 
     private val microphonePermission = registerForActivityResult(
         ActivityResultContracts.RequestPermission(),
@@ -144,15 +133,6 @@ class MainActivity : androidx.activity.ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        ContextCompat.registerReceiver(
-            this,
-            screenLockReceiver,
-            IntentFilter().apply {
-                addAction(Intent.ACTION_SCREEN_OFF)
-                addAction(Intent.ACTION_USER_PRESENT)
-            },
-            ContextCompat.RECEIVER_NOT_EXPORTED,
-        )
         loadSavedRecognitionLanguage()
         initializeSpeech()
         loadSavedPhrases()
@@ -719,7 +699,6 @@ class MainActivity : androidx.activity.ComponentActivity() {
     }
 
     private fun stopPractice() {
-        practicePausedForLock = false
         updateState {
             copy(
                 isActive = false,
@@ -729,22 +708,6 @@ class MainActivity : androidx.activity.ComponentActivity() {
         cancelRecognition()
         cancelSpeech()
         stopPracticeService()
-    }
-
-    private fun pausePracticeForLock() {
-        if (!uiState.isActive || practicePausedForLock) return
-        practicePausedForLock = true
-        cancelRecognition()
-        cancelSpeech()
-        updateState {
-            copy(recognitionStatus = "Microphone paused until the screen is unlocked.")
-        }
-    }
-
-    private fun resumePracticeAfterUnlock() {
-        if (!practicePausedForLock || !uiState.isActive) return
-        practicePausedForLock = false
-        beginPrompt()
     }
 
     private fun startPracticeService(): Boolean {
@@ -845,7 +808,6 @@ class MainActivity : androidx.activity.ComponentActivity() {
     }
 
     override fun onDestroy() {
-        unregisterReceiver(screenLockReceiver)
         cancelRecognition()
         cancelSpeech()
         stopPracticeService()
