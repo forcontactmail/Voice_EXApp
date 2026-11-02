@@ -63,7 +63,7 @@ fun normalizeSpeech(value: String): String =
         .replace(Regex("\\s+"), " ")
 
 fun normalizeAnswer(value: String): String =
-    normalizeSpeech(value)
+    normalizeSpeech(value.replace(Regex("\\b(\\d{1,2})\\s*:\\s*00\\b"), "$1"))
         .split(" ")
         .filterNot { it == "o'clock" }
         .joinToString(" ")

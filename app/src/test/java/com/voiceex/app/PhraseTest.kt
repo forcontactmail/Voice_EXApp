@@ -40,6 +40,10 @@ class PhraseTest {
             normalizeAnswer("Don't call me at nine"),
             normalizeAnswer("Don't call me at nine o'clock"),
         )
+        assertEquals(
+            normalizeAnswer("Don't call me at 9, I'll be watching the match."),
+            normalizeAnswer("Don't call me at 9:00, I'll be watching the match."),
+        )
         assertEquals("don't call me at nine o'clock", normalizeSpeech("Don't call me at nine o'clock"))
     }
 
