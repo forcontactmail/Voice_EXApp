@@ -63,10 +63,13 @@ fun normalizeSpeech(value: String): String =
         .replace(Regex("\\s+"), " ")
 
 fun normalizeAnswer(value: String): String =
-    normalizeSpeech(value.replace(Regex("\\b(\\d{1,2})\\s*:\\s*00\\b"), "$1"))
+    normalizeSpeech(formatRecognizedAnswer(value))
         .split(" ")
         .filterNot { it == "o'clock" }
         .joinToString(" ")
+
+fun formatRecognizedAnswer(value: String): String =
+    value.replace(Regex("\\b(\\d{1,2})\\s*:\\s*00\\b"), "$1")
 
 fun isRepeatCommand(value: String): Boolean =
     normalizeSpeech(value) in setOf(

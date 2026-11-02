@@ -37,6 +37,11 @@ class PhraseTest {
     @Test
     fun answerComparisonIgnoresOptionalOClock() {
         assertEquals(
+            "Don't call me at 9, I'll be watching the match.",
+            formatRecognizedAnswer("Don't call me at 9:00, I'll be watching the match."),
+        )
+        assertEquals("The meeting is at 9:30.", formatRecognizedAnswer("The meeting is at 9:30."))
+        assertEquals(
             normalizeAnswer("Don't call me at nine"),
             normalizeAnswer("Don't call me at nine o'clock"),
         )

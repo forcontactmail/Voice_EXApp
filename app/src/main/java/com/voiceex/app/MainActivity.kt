@@ -747,7 +747,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
                 }
             }
         } else {
-            val recognized = alternatives.firstOrNull().orEmpty()
+            val recognized = formatRecognizedAnswer(alternatives.firstOrNull().orEmpty())
             updateState {
                 copy(
                     reveal = AnswerReveal(recognized, phrase.translation),
