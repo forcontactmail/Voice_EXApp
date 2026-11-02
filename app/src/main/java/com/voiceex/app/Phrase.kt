@@ -41,3 +41,11 @@ fun isRepeatCommand(value: String): Boolean =
         "repeat phrase",
         "repeat",
     )
+
+fun isSkipCommand(value: String): Boolean =
+    normalizeSpeech(value) in setOf(
+        "пропустить вопрос",
+        "пропусти вопрос",
+        "skip question",
+        "skip",
+    )

@@ -33,4 +33,12 @@ class PhraseTest {
         assertTrue(isRepeatCommand("Повтори фразу"))
         assertFalse(isRepeatCommand("Repeat this phrase"))
     }
+
+    @Test
+    fun detectsSkipQuestionCommands() {
+        assertTrue(isSkipCommand("Пропустить вопрос"))
+        assertTrue(isSkipCommand("Пропусти вопрос!"))
+        assertTrue(isSkipCommand("Skip question."))
+        assertFalse(isSkipCommand("Skip the question"))
+    }
 }

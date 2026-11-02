@@ -5,6 +5,7 @@ import android.app.Activity
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -121,6 +122,17 @@ class MainActivity : androidx.activity.ComponentActivity() {
     private var pendingRecognitionRestart: Runnable? = null
     private var utteranceId: String? = null
     private var speechContinuation: (() -> Unit)? = null
+    private var practiceServiceStarted = false
+    private var practicePausedForLock = false
+
+    private val screenLockReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            when (intent?.action) {
+                Intent.ACTION_SCREEN_OFF -> pausePracticeForLock()
+                Intent.ACTION_USER_PRESENT -> resumePracticeAfterUnlock()
+            }
+        }
+    }
 
     private val microphonePermission = registerForActivityResult(
         ActivityResultContracts.RequestPermission(),
@@ -133,6 +145,15 @@ class MainActivity : androidx.activity.ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        ContextCompat.registerReceiver(
+            this,
+            screenLockReceiver,
+            IntentFilter().apply {
+                addAction(Intent.ACTION_SCREEN_OFF)
+                addAction(Intent.ACTION_USER_PRESENT)
+            },
+            ContextCompat.RECEIVER_NOT_EXPORTED,
+        )
         loadSavedRecognitionLanguage()
         initializeSpeech()
         loadSavedPhrases()
@@ -335,11 +356,14 @@ class MainActivity : androidx.activity.ComponentActivity() {
                 if (phrases.isEmpty()) {
                     updateState { copy(loadStatus = "В списке нет фраз.") }
                 } else {
+                    val savedIndex = getPreferences(MODE_PRIVATE)
+                        .getInt(CURRENT_INDEX_KEY, 0)
+                        .coerceIn(0, phrases.size)
                     updateState {
                         copy(
                             sourceText = content,
                             phrases = phrases,
-                            currentIndex = 0,
+                            currentIndex = savedIndex,
                             loadStatus = if (saved == null) {
                                 "Загружен пример. Фраз: ${phrases.size}."
                             } else {
@@ -420,13 +444,14 @@ class MainActivity : androidx.activity.ComponentActivity() {
 
     private fun beginPrompt() {
         val phrase = uiState.phrases.getOrNull(uiState.currentIndex) ?: return
+        if (!startPracticeService()) return
         cancelRecognition()
         cancelSpeech()
         updateState {
             copy(
                 isActive = true,
                 reveal = null,
-                feedback = "Скажите перевод по-английски. Чтобы повторить исходную фразу, скажите “Repeat phrase”.",
+                feedback = "Скажите перевод по-английски. Команды: “Repeat phrase” — повторить, “Пропустить вопрос” — перейти дальше.",
                 recognitionStatus = "Слушайте исходную фразу...",
             )
         }
@@ -561,7 +586,34 @@ class MainActivity : androidx.activity.ComponentActivity() {
             beginPrompt()
             return
         }
+        if (alternatives.any(::isSkipCommand)) {
+            skipQuestion()
+            return
+        }
         checkAnswer(alternatives)
+    }
+
+    private fun skipQuestion() {
+        val nextIndex = uiState.currentIndex + 1
+        val isComplete = nextIndex >= uiState.phrases.size
+        updateState {
+            copy(
+                currentIndex = nextIndex,
+                isActive = !isComplete,
+                reveal = null,
+                feedback = if (isComplete) {
+                    "Вопрос пропущен. Тренировка завершена."
+                } else {
+                    "Вопрос пропущен."
+                },
+                recognitionStatus = "",
+            )
+        }
+        if (isComplete) {
+            speak("Тренировка завершена.", "ru-RU", ::stopPracticeService)
+        } else {
+            speak("Пропускаю вопрос.", "ru-RU") { beginPrompt() }
+        }
     }
 
     private fun retryAfterUnrecognizedSpeech() {
@@ -587,7 +639,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
                             recognitionStatus = "",
                         )
                     }
-                    speak("Тренировка завершена.", "ru-RU")
+                    speak("Тренировка завершена.", "ru-RU", ::stopPracticeService)
                 } else {
                     updateState { copy(currentIndex = nextIndex, reveal = null) }
                     beginPrompt()
@@ -649,7 +701,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
         utteranceId = null
         val continuation = speechContinuation
         speechContinuation = null
-        if (uiState.isActive) continuation?.invoke()
+        continuation?.invoke()
     }
 
     private fun cancelSpeech() {
@@ -669,6 +721,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
     }
 
     private fun stopPractice() {
+        practicePausedForLock = false
         updateState {
             copy(
                 isActive = false,
@@ -677,6 +730,46 @@ class MainActivity : androidx.activity.ComponentActivity() {
         }
         cancelRecognition()
         cancelSpeech()
+        stopPracticeService()
+    }
+
+    private fun pausePracticeForLock() {
+        if (!uiState.isActive || practicePausedForLock) return
+        practicePausedForLock = true
+        cancelRecognition()
+        cancelSpeech()
+        updateState {
+            copy(recognitionStatus = "Микрофон приостановлен до разблокировки экрана.")
+        }
+    }
+
+    private fun resumePracticeAfterUnlock() {
+        if (!practicePausedForLock || !uiState.isActive) return
+        practicePausedForLock = false
+        beginPrompt()
+    }
+
+    private fun startPracticeService(): Boolean {
+        if (practiceServiceStarted) return true
+        return try {
+            ContextCompat.startForegroundService(
+                this,
+                Intent(this, VoicePracticeService::class.java),
+            )
+            practiceServiceStarted = true
+            true
+        } catch (error: RuntimeException) {
+            updateState {
+                copy(recognitionStatus = "Не удалось запустить фоновую голосовую практику: ${error.message}")
+            }
+            false
+        }
+    }
+
+    private fun stopPracticeService() {
+        if (!practiceServiceStarted) return
+        stopService(Intent(this, VoicePracticeService::class.java))
+        practiceServiceStarted = false
     }
 
     private fun importPhrases() {
@@ -741,12 +834,23 @@ class MainActivity : androidx.activity.ComponentActivity() {
     }
 
     private fun updateState(update: PracticeUiState.() -> PracticeUiState) {
-        runOnUiThread { uiState = uiState.update() }
+        runOnUiThread {
+            val updatedState = uiState.update()
+            if (updatedState.currentIndex != uiState.currentIndex) {
+                getPreferences(MODE_PRIVATE)
+                    .edit()
+                    .putInt(CURRENT_INDEX_KEY, updatedState.currentIndex)
+                    .apply()
+            }
+            uiState = updatedState
+        }
     }
 
     override fun onDestroy() {
+        unregisterReceiver(screenLockReceiver)
         cancelRecognition()
         cancelSpeech()
+        stopPracticeService()
         speechRecognizer?.destroy()
         speechRecognizer = null
         textToSpeech?.shutdown()
@@ -757,6 +861,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
     companion object {
         private const val RECOGNITION_RESULT_TIMEOUT_MILLIS = 10_000L
         private const val PHRASES_KEY = "voicePractice.phrases"
+        private const val CURRENT_INDEX_KEY = "voicePractice.currentIndex"
         private const val RUSSIAN_VOICE_KEY = "voicePractice.russianVoice"
         private const val ENGLISH_VOICE_KEY = "voicePractice.englishVoice"
         private const val RECOGNITION_LANGUAGE_KEY = "voicePractice.recognitionLanguage"
