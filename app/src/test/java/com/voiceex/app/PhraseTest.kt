@@ -35,16 +35,18 @@ class PhraseTest {
     }
 
     @Test
-    fun detectsRatingCommandWithCommonSpellings() {
-        assertTrue(isRatingCommand("Raiting"))
+    fun detectsRatingCommand() {
+        assertTrue(isRatingCommand("Rating"))
         assertTrue(isRatingCommand("Rating."))
+        assertFalse(isRatingCommand("Raiting"))
         assertFalse(isRatingCommand("My rating"))
     }
 
     @Test
     fun detectsClearRatingCommand() {
-        assertTrue(isClearRatingCommand("Clear raiting"))
+        assertTrue(isClearRatingCommand("Clear rating"))
         assertTrue(isClearRatingCommand("Clear rating."))
+        assertFalse(isClearRatingCommand("Clear raiting"))
         assertFalse(isClearRatingCommand("Clear this rating"))
     }
 

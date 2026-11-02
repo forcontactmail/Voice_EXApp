@@ -453,7 +453,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
             copy(
                 isActive = true,
                 reveal = null,
-                feedback = "Say the English translation. Voice commands: “Repeat phrase”, “Skip”, “Previous phrase”, “First phrase”, “Raiting”, or “Clear raiting”.",
+                feedback = "Say the English translation. Voice commands: “Repeat phrase”, “Skip”, “Previous phrase”, “First phrase”, “Rating”, or “Clear rating”.",
                 recognitionStatus = "Listen to the source phrase...",
             )
         }

@@ -79,16 +79,10 @@ fun isSkipCommand(value: String): Boolean =
     )
 
 fun isRatingCommand(value: String): Boolean =
-    normalizeSpeech(value) in setOf(
-        "raiting",
-        "rating",
-    )
+    normalizeSpeech(value) == "rating"
 
 fun isClearRatingCommand(value: String): Boolean =
-    normalizeSpeech(value) in setOf(
-        "clear raiting",
-        "clear rating",
-    )
+    normalizeSpeech(value) == "clear rating"
 
 sealed interface PhraseNavigationCommand {
     data object FirstPhrase : PhraseNavigationCommand
