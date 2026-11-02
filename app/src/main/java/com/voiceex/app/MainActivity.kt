@@ -901,7 +901,7 @@ private fun VoicePracticeScreen(
                 } else {
                     Box {
                         TextButton(onClick = { menuExpanded = true }) {
-                            Text("☰ Menu", color = GreenDark)
+                            Text("☰", color = GreenDark)
                         }
                         DropdownMenu(
                             expanded = menuExpanded,
