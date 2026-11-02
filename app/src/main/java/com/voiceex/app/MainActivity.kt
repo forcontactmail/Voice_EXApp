@@ -429,7 +429,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
             copy(
                 isActive = true,
                 reveal = null,
-                feedback = "Say the English translation. Voice commands: “Repeat phrase” or “Skip”.",
+                feedback = "Say the English translation. Voice commands: “Repeat phrase”, “Skip”, “Previous phrase”, “Go back three phrases”, or “First phrase”.",
                 recognitionStatus = "Listen to the source phrase...",
             )
         }
@@ -567,6 +567,25 @@ class MainActivity : androidx.activity.ComponentActivity() {
         if (alternatives.any(::isSkipCommand)) {
             skipQuestion()
             return
+        }
+        val navigationCommand = alternatives.firstNotNullOfOrNull(::parsePhraseNavigationCommand)
+        when (navigationCommand) {
+            PhraseNavigationCommand.FirstPhrase -> {
+                updateState { copy(currentIndex = 0, reveal = null) }
+                beginPrompt()
+                return
+            }
+            is PhraseNavigationCommand.PreviousPhrases -> {
+                updateState {
+                    copy(
+                        currentIndex = (currentIndex - navigationCommand.count).coerceAtLeast(0),
+                        reveal = null,
+                    )
+                }
+                beginPrompt()
+                return
+            }
+            null -> Unit
         }
         checkAnswer(alternatives)
     }

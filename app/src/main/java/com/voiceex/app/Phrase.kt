@@ -47,3 +47,56 @@ fun isSkipCommand(value: String): Boolean =
         "skip question",
         "skip",
     )
+
+sealed interface PhraseNavigationCommand {
+    data object FirstPhrase : PhraseNavigationCommand
+    data class PreviousPhrases(val count: Int) : PhraseNavigationCommand
+}
+
+private val spokenPhraseCounts = mapOf(
+    "one" to 1,
+    "two" to 2,
+    "three" to 3,
+    "four" to 4,
+    "five" to 5,
+    "six" to 6,
+    "seven" to 7,
+    "eight" to 8,
+    "nine" to 9,
+    "ten" to 10,
+)
+
+private val englishPreviousPhrasesPattern =
+    Regex("^(?:(?:go )?back|previous|go to previous|return to previous) (.+) (?:phrases?|questions?)$")
+
+fun parsePhraseNavigationCommand(value: String): PhraseNavigationCommand? {
+    val normalized = normalizeSpeech(value)
+    if (normalized in setOf(
+            "first phrase",
+            "first question",
+            "go to first phrase",
+            "go to the first phrase",
+            "start from the beginning",
+        )
+    ) {
+        return PhraseNavigationCommand.FirstPhrase
+    }
+
+    if (normalized in setOf(
+            "previous",
+            "previous phrase",
+            "previous question",
+            "go back",
+            "go back one phrase",
+            "back",
+            "back one phrase",
+        )
+    ) {
+        return PhraseNavigationCommand.PreviousPhrases(1)
+    }
+
+    val countText = englishPreviousPhrasesPattern.matchEntire(normalized)?.groupValues?.get(1)
+        ?: return null
+    val count = countText.toIntOrNull() ?: spokenPhraseCounts[countText] ?: return null
+    return count.takeIf { it > 0 }?.let(PhraseNavigationCommand::PreviousPhrases)
+}

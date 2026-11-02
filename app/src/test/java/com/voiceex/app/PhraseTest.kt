@@ -42,4 +42,21 @@ class PhraseTest {
         assertFalse(isSkipCommand("Пропусти вопрос"))
         assertFalse(isSkipCommand("Skip the question"))
     }
+
+    @Test
+    fun detectsNavigationToPreviousPhrases() {
+        assertEquals(PhraseNavigationCommand.PreviousPhrases(1), parsePhraseNavigationCommand("Previous phrase"))
+        assertEquals(PhraseNavigationCommand.PreviousPhrases(3), parsePhraseNavigationCommand("Go back three phrases"))
+        assertEquals(PhraseNavigationCommand.PreviousPhrases(4), parsePhraseNavigationCommand("Go back 4 phrases"))
+        assertEquals(PhraseNavigationCommand.PreviousPhrases(2), parsePhraseNavigationCommand("Previous two phrases"))
+        assertEquals(null, parsePhraseNavigationCommand("Go back zero phrases"))
+        assertEquals(null, parsePhraseNavigationCommand("Previous this phrase"))
+        assertEquals(null, parsePhraseNavigationCommand("Назад на 4 фразы"))
+    }
+
+    @Test
+    fun detectsNavigationToFirstPhrase() {
+        assertEquals(PhraseNavigationCommand.FirstPhrase, parsePhraseNavigationCommand("First phrase"))
+        assertEquals(PhraseNavigationCommand.FirstPhrase, parsePhraseNavigationCommand("Start from the beginning"))
+    }
 }
