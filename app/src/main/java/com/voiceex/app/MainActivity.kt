@@ -366,7 +366,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
                             sourceText = content,
                             phrases = phrases,
                             currentIndex = savedIndex,
-                            firstTryRating = FirstTryRating(),
+                            firstTryRating = loadSavedFirstTryRating(phrases.size),
                             loadStatus = if (saved == null) {
                                 "Sample loaded. Phrases: ${phrases.size}."
                             } else {
@@ -921,15 +921,45 @@ class MainActivity : androidx.activity.ComponentActivity() {
             }
     }
 
+    private fun loadSavedFirstTryRating(phraseCount: Int): FirstTryRating {
+        val preferences = getPreferences(MODE_PRIVATE)
+        val validIndexes = 0 until phraseCount
+        val attempted = preferences.getStringSet(FIRST_TRY_ATTEMPTED_KEY, emptySet())
+            .orEmpty()
+            .mapNotNull(String::toIntOrNull)
+            .filter { it in validIndexes }
+            .toSet()
+        val correctFirstTry = preferences.getStringSet(FIRST_TRY_CORRECT_KEY, emptySet())
+            .orEmpty()
+            .mapNotNull(String::toIntOrNull)
+            .filter { it in validIndexes }
+            .toSet()
+        return FirstTryRating.fromIndexes(attempted, correctFirstTry)
+    }
+
     private fun updateState(update: PracticeUiState.() -> PracticeUiState) {
         runOnUiThread {
             val updatedState = uiState.update()
+            val preferences = getPreferences(MODE_PRIVATE)
+            val editor = preferences.edit()
+            var hasPersistenceChanges = false
             if (updatedState.currentIndex != uiState.currentIndex) {
-                getPreferences(MODE_PRIVATE)
-                    .edit()
-                    .putInt(CURRENT_INDEX_KEY, updatedState.currentIndex)
-                    .apply()
+                editor.putInt(CURRENT_INDEX_KEY, updatedState.currentIndex)
+                hasPersistenceChanges = true
             }
+            if (updatedState.firstTryRating !== uiState.firstTryRating) {
+                editor
+                    .putStringSet(
+                        FIRST_TRY_ATTEMPTED_KEY,
+                        updatedState.firstTryRating.attemptedPhraseIndexes.map(Int::toString).toSet(),
+                    )
+                    .putStringSet(
+                        FIRST_TRY_CORRECT_KEY,
+                        updatedState.firstTryRating.correctFirstTryPhraseIndexes.map(Int::toString).toSet(),
+                    )
+                hasPersistenceChanges = true
+            }
+            if (hasPersistenceChanges) editor.apply()
             uiState = updatedState
         }
     }
@@ -949,6 +979,8 @@ class MainActivity : androidx.activity.ComponentActivity() {
         private const val RECOGNITION_RESULT_TIMEOUT_MILLIS = 10_000L
         private const val PHRASES_KEY = "voicePractice.phrases"
         private const val CURRENT_INDEX_KEY = "voicePractice.currentIndex"
+        private const val FIRST_TRY_ATTEMPTED_KEY = "voicePractice.firstTryRating.attempted"
+        private const val FIRST_TRY_CORRECT_KEY = "voicePractice.firstTryRating.correct"
         private const val RUSSIAN_VOICE_KEY = "voicePractice.russianVoice"
         private const val ENGLISH_VOICE_KEY = "voicePractice.englishVoice"
         private const val LEGACY_RUSSIAN_VOICE_KEY = "russianVoice"

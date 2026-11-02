@@ -6,8 +6,8 @@ import kotlin.math.roundToInt
 data class Phrase(val prompt: String, val translation: String)
 
 class FirstTryRating private constructor(
-    private val attemptedPhraseIndexes: Set<Int>,
-    private val correctFirstTryPhraseIndexes: Set<Int>,
+    val attemptedPhraseIndexes: Set<Int>,
+    val correctFirstTryPhraseIndexes: Set<Int>,
 ) {
     constructor() : this(emptySet(), emptySet())
 
@@ -30,6 +30,13 @@ class FirstTryRating private constructor(
                 correctFirstTryPhraseIndexes
             },
         )
+    }
+
+    companion object {
+        fun fromIndexes(attempted: Set<Int>, correctFirstTry: Set<Int>): FirstTryRating {
+            val validAttempted = attempted.filter { it >= 0 }.toSet()
+            return FirstTryRating(validAttempted, correctFirstTry.intersect(validAttempted))
+        }
     }
 
 }

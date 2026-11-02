@@ -87,6 +87,18 @@ class PhraseTest {
     }
 
     @Test
+    fun restoresFirstTryRatingFromSavedPhraseIndexes() {
+        val rating = FirstTryRating.fromIndexes(
+            attempted = setOf(0, 1, 2, -1),
+            correctFirstTry = setOf(0, 2, 3),
+        )
+
+        assertEquals(3, rating.phraseCount)
+        assertEquals(2, rating.correctPhraseCount)
+        assertEquals(67, rating.percentage)
+    }
+
+    @Test
     fun answerCheckDelayUsesHalfSecondStepsWithinRange() {
         assertEquals(0L, answerCheckDelayMillis(0))
         assertEquals(500L, answerCheckDelayMillis(1))
