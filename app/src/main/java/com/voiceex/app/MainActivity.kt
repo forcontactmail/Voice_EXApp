@@ -98,6 +98,7 @@ private data class PracticeUiState(
     val feedback: String = "Tap Start Practice to begin.",
     val recognitionStatus: String = "",
     val loadStatus: String = "Loading sample...",
+    val firstTryRating: FirstTryRating = FirstTryRating(),
     val reveal: AnswerReveal? = null,
     val russianVoices: List<String> = emptyList(),
     val englishVoices: List<String> = emptyList(),
@@ -343,6 +344,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
                             sourceText = content,
                             phrases = phrases,
                             currentIndex = savedIndex,
+                            firstTryRating = FirstTryRating(),
                             loadStatus = if (saved == null) {
                                 "Sample loaded. Phrases: ${phrases.size}."
                             } else {
@@ -451,7 +453,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
             copy(
                 isActive = true,
                 reveal = null,
-                feedback = "Say the English translation. Voice commands: “Repeat phrase”, “Skip”, “Previous phrase”, “Go back three phrases”, or “First phrase”.",
+                feedback = "Say the English translation. Voice commands: “Repeat phrase”, “Skip”, “Previous phrase”, “First phrase”, “Raiting”, or “Clear raiting”.",
                 recognitionStatus = "Listen to the source phrase...",
             )
         }
@@ -590,6 +592,14 @@ class MainActivity : androidx.activity.ComponentActivity() {
             skipQuestion()
             return
         }
+        if (alternatives.any(::isClearRatingCommand)) {
+            clearRating()
+            return
+        }
+        if (alternatives.any(::isRatingCommand)) {
+            reportRating()
+            return
+        }
         val navigationCommand = alternatives.firstNotNullOfOrNull(::parsePhraseNavigationCommand)
         when (navigationCommand) {
             PhraseNavigationCommand.FirstPhrase -> {
@@ -640,12 +650,45 @@ class MainActivity : androidx.activity.ComponentActivity() {
         listenAgain()
     }
 
+    private fun reportRating() {
+        val rating = uiState.firstTryRating
+        val feedback = if (rating.phraseCount == 0) {
+            "No phrases answered yet. First-try rating: 0%."
+        } else {
+            "${rating.phraseCount} phrases evaluated; ${rating.correctPhraseCount} correct on the first try (${rating.percentage}%)."
+        }
+        val spokenReport = if (rating.phraseCount == 0) {
+            "No phrases answered yet. Your first-try rating is 0 percent."
+        } else {
+            val phraseWord = if (rating.phraseCount == 1) "phrase" else "phrases"
+            "You have answered ${rating.phraseCount} $phraseWord. Your first-try rating is ${rating.percentage} percent."
+        }
+        updateState { copy(feedback = feedback, recognitionStatus = "") }
+        speak(spokenReport, "en-US") { startListening(uiState.selectedRecognitionLanguage) }
+    }
+
+    private fun clearRating() {
+        updateState {
+            copy(
+                firstTryRating = FirstTryRating(),
+                feedback = "Rating cleared. Start a new first-try rating.",
+                recognitionStatus = "",
+            )
+        }
+        speak("Rating cleared.", "en-US") { startListening(uiState.selectedRecognitionLanguage) }
+    }
+
     private fun checkAnswer(alternatives: List<String>) {
         val phrase = uiState.phrases.getOrNull(uiState.currentIndex) ?: return
         val correct = normalizeSpeech(phrase.translation)
         if (alternatives.any { normalizeSpeech(it) == correct }) {
             updateState {
-                copy(feedback = "Correct.", recognitionStatus = "", reveal = null)
+                copy(
+                    feedback = "Correct.",
+                    recognitionStatus = "",
+                    reveal = null,
+                    firstTryRating = firstTryRating.recordAnswer(currentIndex, isCorrect = true),
+                )
             }
             speak("Correct.", "en-US") {
                 val nextIndex = uiState.currentIndex + 1
@@ -671,6 +714,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
                     reveal = AnswerReveal(recognized, phrase.translation),
                     feedback = "Incorrect. Listen to the recognized answer and the correct translation, then try again.",
                     recognitionStatus = "",
+                    firstTryRating = firstTryRating.recordAnswer(currentIndex, isCorrect = false),
                 )
             }
             speak(recognized, "en-US") {
@@ -795,6 +839,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
                                 sourceText = content,
                                 phrases = phrases,
                                 currentIndex = 0,
+                                firstTryRating = FirstTryRating(),
                                 reveal = null,
                                 feedback = "Tap Start Practice to begin.",
                                 loadStatus = "File loaded. Phrases: ${phrases.size}. Tap Save List to use it next time.",
@@ -824,6 +869,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
                         sourceText = content,
                         phrases = phrases,
                         currentIndex = 0,
+                        firstTryRating = FirstTryRating(),
                         reveal = null,
                         loadStatus = "List saved on this device. Phrases: ${phrases.size}.",
                         feedback = "Tap Start Practice to begin.",

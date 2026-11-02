@@ -1,8 +1,38 @@
 package com.voiceex.app
 
 import java.util.Locale
+import kotlin.math.roundToInt
 
 data class Phrase(val prompt: String, val translation: String)
+
+class FirstTryRating private constructor(
+    private val attemptedPhraseIndexes: Set<Int>,
+    private val correctFirstTryPhraseIndexes: Set<Int>,
+) {
+    constructor() : this(emptySet(), emptySet())
+
+    val phraseCount: Int
+        get() = attemptedPhraseIndexes.size
+
+    val correctPhraseCount: Int
+        get() = correctFirstTryPhraseIndexes.size
+
+    val percentage: Int
+        get() = if (phraseCount == 0) 0 else (correctPhraseCount * 100f / phraseCount).roundToInt()
+
+    fun recordAnswer(phraseIndex: Int, isCorrect: Boolean): FirstTryRating {
+        if (phraseIndex in attemptedPhraseIndexes) return this
+        return FirstTryRating(
+            attemptedPhraseIndexes = attemptedPhraseIndexes + phraseIndex,
+            correctFirstTryPhraseIndexes = if (isCorrect) {
+                correctFirstTryPhraseIndexes + phraseIndex
+            } else {
+                correctFirstTryPhraseIndexes
+            },
+        )
+    }
+
+}
 
 object PhraseParser {
     fun parse(content: String): List<Phrase> {
@@ -46,6 +76,18 @@ fun isSkipCommand(value: String): Boolean =
     normalizeSpeech(value) in setOf(
         "skip question",
         "skip",
+    )
+
+fun isRatingCommand(value: String): Boolean =
+    normalizeSpeech(value) in setOf(
+        "raiting",
+        "rating",
+    )
+
+fun isClearRatingCommand(value: String): Boolean =
+    normalizeSpeech(value) in setOf(
+        "clear raiting",
+        "clear rating",
     )
 
 sealed interface PhraseNavigationCommand {

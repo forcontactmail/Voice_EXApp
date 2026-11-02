@@ -35,6 +35,35 @@ class PhraseTest {
     }
 
     @Test
+    fun detectsRatingCommandWithCommonSpellings() {
+        assertTrue(isRatingCommand("Raiting"))
+        assertTrue(isRatingCommand("Rating."))
+        assertFalse(isRatingCommand("My rating"))
+    }
+
+    @Test
+    fun detectsClearRatingCommand() {
+        assertTrue(isClearRatingCommand("Clear raiting"))
+        assertTrue(isClearRatingCommand("Clear rating."))
+        assertFalse(isClearRatingCommand("Clear this rating"))
+    }
+
+    @Test
+    fun ratesUniquePhrasesByFirstAttempt() {
+        val rating = FirstTryRating()
+            .recordAnswer(0, isCorrect = true)
+            .recordAnswer(1, isCorrect = false)
+            .recordAnswer(1, isCorrect = true)
+            .recordAnswer(2, isCorrect = true)
+
+        assertEquals(3, rating.phraseCount)
+        assertEquals(2, rating.correctPhraseCount)
+        assertEquals(67, rating.percentage)
+
+        assertEquals(0, FirstTryRating().percentage)
+    }
+
+    @Test
     fun detectsSkipQuestionCommands() {
         assertTrue(isSkipCommand("Skip question."))
         assertTrue(isSkipCommand("Skip"))
