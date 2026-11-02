@@ -12,12 +12,12 @@ object PhraseParser {
             val separatorIndex = if (tabIndex >= 0) tabIndex else line.indexOf('|')
             if (separatorIndex < 0) {
                 if (line.isBlank()) null
-                else throw IllegalArgumentException("В строке ${index + 1} нет разделителя | или Tab")
+                else throw IllegalArgumentException("Line ${index + 1} is missing a | or tab separator")
             } else {
                 val prompt = line.substring(0, separatorIndex).trim()
                 val translation = line.substring(separatorIndex + 1).trim()
                 if (prompt.isEmpty() || translation.isEmpty()) {
-                    throw IllegalArgumentException("Проверьте исходную фразу и перевод в строке ${index + 1}")
+                    throw IllegalArgumentException("Check the source phrase and translation on line ${index + 1}")
                 }
                 Phrase(prompt, translation)
             }
@@ -44,8 +44,6 @@ fun isRepeatCommand(value: String): Boolean =
 
 fun isSkipCommand(value: String): Boolean =
     normalizeSpeech(value) in setOf(
-        "пропустить вопрос",
-        "пропусти вопрос",
         "skip question",
         "skip",
     )

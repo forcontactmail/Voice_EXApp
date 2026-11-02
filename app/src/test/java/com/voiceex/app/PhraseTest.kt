@@ -22,8 +22,8 @@ class PhraseTest {
         val missingSeparator = runCatching { PhraseParser.parse("Привет") }.exceptionOrNull()
         val missingTranslation = runCatching { PhraseParser.parse("Привет | ") }.exceptionOrNull()
 
-        assertEquals("В строке 1 нет разделителя | или Tab", missingSeparator?.message)
-        assertEquals("Проверьте исходную фразу и перевод в строке 1", missingTranslation?.message)
+        assertEquals("Line 1 is missing a | or tab separator", missingSeparator?.message)
+        assertEquals("Check the source phrase and translation on line 1", missingTranslation?.message)
     }
 
     @Test
@@ -36,9 +36,10 @@ class PhraseTest {
 
     @Test
     fun detectsSkipQuestionCommands() {
-        assertTrue(isSkipCommand("Пропустить вопрос"))
-        assertTrue(isSkipCommand("Пропусти вопрос!"))
         assertTrue(isSkipCommand("Skip question."))
+        assertTrue(isSkipCommand("Skip"))
+        assertFalse(isSkipCommand("Пропустить вопрос"))
+        assertFalse(isSkipCommand("Пропусти вопрос"))
         assertFalse(isSkipCommand("Skip the question"))
     }
 }

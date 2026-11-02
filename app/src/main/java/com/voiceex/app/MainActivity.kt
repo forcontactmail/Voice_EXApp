@@ -34,7 +34,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
@@ -96,9 +95,9 @@ private data class PracticeUiState(
     val phrases: List<Phrase> = emptyList(),
     val currentIndex: Int = 0,
     val isActive: Boolean = false,
-    val feedback: String = "Нажмите «Начать», чтобы запустить голосовую практику.",
+    val feedback: String = "Tap Start Practice to begin.",
     val recognitionStatus: String = "",
-    val loadStatus: String = "Загружаю пример...",
+    val loadStatus: String = "Loading sample...",
     val reveal: AnswerReveal? = null,
     val russianVoices: List<String> = emptyList(),
     val englishVoices: List<String> = emptyList(),
@@ -106,8 +105,8 @@ private data class PracticeUiState(
     val selectedEnglishVoice: String = "",
     val recognitionLanguages: List<String> = listOf(DEFAULT_RECOGNITION_LANGUAGE),
     val selectedRecognitionLanguage: String = DEFAULT_RECOGNITION_LANGUAGE,
-    val recognitionLanguageStatus: String = "Загружаю языки распознавания...",
-    val voiceStatus: String = "Голоса загружаются...",
+    val recognitionLanguageStatus: String = "Loading recognition languages...",
+    val voiceStatus: String = "Loading voices...",
 )
 
 class MainActivity : androidx.activity.ComponentActivity() {
@@ -139,7 +138,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
     ) { granted ->
         if (granted) beginPrompt()
         else updateState {
-            copy(recognitionStatus = "Разрешите доступ к микрофону в настройках Android, чтобы говорить перевод.")
+            copy(recognitionStatus = "Allow microphone access in Android settings to speak your translation.")
         }
     }
 
@@ -172,7 +171,6 @@ class MainActivity : androidx.activity.ComponentActivity() {
                         state = uiState,
                         onStart = ::requestMicrophoneAndStart,
                         onStop = ::stopPractice,
-                        onRepeat = ::requestMicrophoneAndStart,
                         onImport = ::importPhrases,
                         onSavePhrases = ::savePhrases,
                         onChooseRussianVoice = { saveVoice("russianVoice", it, true) },
@@ -194,14 +192,14 @@ class MainActivity : androidx.activity.ComponentActivity() {
                     override fun onDone(id: String?) = runOnUiThread { finishSpeech(id) }
                     @Deprecated("Deprecated in Java")
                     override fun onError(id: String?) = runOnUiThread {
-                        updateState { copy(recognitionStatus = "Не удалось озвучить фразу. Проверьте установленные голоса в Android.") }
+                        updateState { copy(recognitionStatus = "Could not speak the phrase. Check the installed voices in Android settings.") }
                         finishSpeech(id)
                     }
                     override fun onError(id: String?, errorCode: Int) = onError(id)
                 })
                 loadVoices()
             } else {
-                updateState { copy(voiceStatus = "Синтез речи недоступен. Установите службу Text-to-Speech в Android.") }
+                updateState { copy(voiceStatus = "Text-to-speech is unavailable. Install a text-to-speech service in Android settings.") }
             }
         }
     }
@@ -212,7 +210,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
             updateState {
                 copy(
                     isActive = false,
-                    recognitionStatus = "Не найдена служба распознавания речи. Установите или включите приложение распознавания речи в Android.",
+                    recognitionStatus = "Speech recognition is unavailable. Install or enable a speech recognition service in Android settings.",
                 )
             }
             return false
@@ -224,7 +222,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
             updateState {
                 copy(
                     isActive = false,
-                    recognitionStatus = "Не удалось подключиться к службе распознавания речи: ${error.message ?: "ошибка службы"}.",
+                    recognitionStatus = "Could not connect to the speech recognition service: ${error.message ?: "service error"}.",
                 )
             }
             false
@@ -325,9 +323,9 @@ class MainActivity : androidx.activity.ComponentActivity() {
                 recognitionLanguages = availableLanguages,
                 selectedRecognitionLanguage = selectedLanguage,
                 recognitionLanguageStatus = if (languages.isEmpty()) {
-                    "Выберите вариант английского. Доступность зависит от службы распознавания и установленных речевых пакетов Android."
+                    "Choose an English locale. Availability depends on the Android recognition service and installed speech packs."
                 } else {
-                    "Выберите вариант английского; поддержка выбранного языка зависит от службы распознавания Android."
+                    "Choose an English locale. Support depends on the Android recognition service."
                 },
             )
         }
@@ -348,13 +346,13 @@ class MainActivity : androidx.activity.ComponentActivity() {
         val content = saved ?: runCatching {
             assets.open("phrases.txt").bufferedReader(Charsets.UTF_8).use { it.readText() }
         }.getOrElse { error ->
-            updateState { copy(loadStatus = "Не удалось загрузить пример: ${error.message}") }
+            updateState { copy(loadStatus = "Could not load the sample: ${error.message}") }
             return
         }
         runCatching { PhraseParser.parse(content) }
             .onSuccess { phrases ->
                 if (phrases.isEmpty()) {
-                    updateState { copy(loadStatus = "В списке нет фраз.") }
+                    updateState { copy(loadStatus = "The list contains no phrases.") }
                 } else {
                     val savedIndex = getPreferences(MODE_PRIVATE)
                         .getInt(CURRENT_INDEX_KEY, 0)
@@ -365,16 +363,16 @@ class MainActivity : androidx.activity.ComponentActivity() {
                             phrases = phrases,
                             currentIndex = savedIndex,
                             loadStatus = if (saved == null) {
-                                "Загружен пример. Фраз: ${phrases.size}."
+                                "Sample loaded. Phrases: ${phrases.size}."
                             } else {
-                                "Загружен сохранённый список. Фраз: ${phrases.size}."
+                                "Saved list loaded. Phrases: ${phrases.size}."
                             },
                         )
                     }
                 }
             }
             .onFailure { error ->
-                updateState { copy(loadStatus = "Ошибка списка фраз: ${error.message}") }
+                updateState { copy(loadStatus = "Phrase list error: ${error.message}") }
             }
     }
 
@@ -408,9 +406,9 @@ class MainActivity : androidx.activity.ComponentActivity() {
                     (savedRussian != null && savedRussian !in russian.map { it.name }) ||
                     (savedEnglish != null && savedEnglish !in english.map { it.name })
                 ) {
-                    "Некоторые сохранённые голоса сейчас недоступны. Установите нужный речевой пакет; Android временно использует голос по умолчанию."
+                    "Some saved voices are unavailable. Install the required speech pack; Android is temporarily using the default voice."
                 } else {
-                    "Голоса озвучивания загружены."
+                    "Text-to-speech voices loaded."
                 },
             )
         }
@@ -419,8 +417,8 @@ class MainActivity : androidx.activity.ComponentActivity() {
     private fun saveVoice(key: String, name: String, russian: Boolean) {
         getPreferences(MODE_PRIVATE).edit().putString(key, name).apply()
         updateState {
-            if (russian) copy(selectedRussianVoice = name, voiceStatus = "Выбор русского голоса сохранён.")
-            else copy(selectedEnglishVoice = name, voiceStatus = "Выбор английского голоса сохранён.")
+            if (russian) copy(selectedRussianVoice = name, voiceStatus = "Russian voice selection saved.")
+            else copy(selectedEnglishVoice = name, voiceStatus = "English voice selection saved.")
         }
     }
 
@@ -430,7 +428,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
             updateState {
                 copy(
                     currentIndex = 0,
-                    feedback = "Начинаем тренировку заново.",
+                    feedback = "Starting the practice again.",
                     reveal = null,
                 )
             }
@@ -451,8 +449,8 @@ class MainActivity : androidx.activity.ComponentActivity() {
             copy(
                 isActive = true,
                 reveal = null,
-                feedback = "Скажите перевод по-английски. Команды: “Repeat phrase” — повторить, “Пропустить вопрос” — перейти дальше.",
-                recognitionStatus = "Слушайте исходную фразу...",
+                feedback = "Say the English translation. Voice commands: “Repeat phrase” or “Skip”.",
+                recognitionStatus = "Listen to the source phrase...",
             )
         }
         speak(phrase.prompt, "ru-RU") { startListening(uiState.selectedRecognitionLanguage) }
@@ -462,7 +460,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
         if (!uiState.isActive) return
         if (!ensureSpeechRecognizer()) return
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            updateState { copy(recognitionStatus = "Нет разрешения на использование микрофона.") }
+            updateState { copy(recognitionStatus = "Microphone permission is not granted.") }
             return
         }
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
@@ -476,11 +474,11 @@ class MainActivity : androidx.activity.ComponentActivity() {
             speechRecognizer?.setRecognitionListener(createRecognitionListener(attemptId))
             isListening = true
             awaitingRecognitionResult = false
-            updateState { copy(recognitionStatus = "Запускаю распознавание речи...") }
+            updateState { copy(recognitionStatus = "Starting speech recognition...") }
             speechRecognizer?.startListening(intent)
         } catch (error: RuntimeException) {
             isListening = false
-            updateState { copy(recognitionStatus = "Не удалось запустить микрофон. Перезапускаю службу речи...") }
+            updateState { copy(recognitionStatus = "Could not start the microphone. Restarting speech recognition...") }
             recreateSpeechRecognizer()
             listenAgain(delayMillis = 1_000)
         }
@@ -490,12 +488,12 @@ class MainActivity : androidx.activity.ComponentActivity() {
         override fun onReadyForSpeech(params: Bundle?) {
             if (attemptId != recognitionAttemptId) return
             isListening = true
-            updateState { copy(recognitionStatus = "Слушаю перевод по-английски...") }
+            updateState { copy(recognitionStatus = "Listening for the English translation...") }
         }
 
         override fun onBeginningOfSpeech() {
             if (attemptId != recognitionAttemptId) return
-            updateState { copy(recognitionStatus = "Речь обнаружена, распознаю перевод...") }
+            updateState { copy(recognitionStatus = "Speech detected. Recognizing the translation...") }
         }
         override fun onRmsChanged(rmsdB: Float) = Unit
         override fun onBufferReceived(buffer: ByteArray?) = Unit
@@ -503,7 +501,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
             if (attemptId != recognitionAttemptId) return
             isListening = false
             awaitingRecognitionResult = true
-            if (uiState.isActive) updateState { copy(recognitionStatus = "Обрабатываю перевод...") }
+            if (uiState.isActive) updateState { copy(recognitionStatus = "Processing the translation...") }
             scheduleRecognitionResultTimeout(attemptId)
         }
 
@@ -517,21 +515,21 @@ class MainActivity : androidx.activity.ComponentActivity() {
                     retryAfterUnrecognizedSpeech()
                 }
                 SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS ->
-                    updateState { copy(recognitionStatus = "Разрешите приложению доступ к микрофону в настройках Android.") }
+                    updateState { copy(recognitionStatus = "Allow microphone access for this app in Android settings.") }
                 SpeechRecognizer.ERROR_NETWORK, SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> {
-                    updateState { copy(recognitionStatus = "Нет соединения со службой распознавания речи. Повторяю попытку...") }
+                    updateState { copy(recognitionStatus = "No connection to the speech recognition service. Retrying...") }
                     listenAgain(delayMillis = 2_000)
                 }
                 SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED, SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE ->
                     updateState {
-                        copy(recognitionStatus = "Служба не поддерживает выбранный язык (${uiState.selectedRecognitionLanguage}). Выберите другой язык распознавания или установите его речевой пакет в Android.")
+                        copy(recognitionStatus = "The service does not support ${uiState.selectedRecognitionLanguage}. Choose another recognition language or install its speech pack in Android settings.")
                     }
                 SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> {
-                    updateState { copy(recognitionStatus = "Служба речи занята. Повторяю попытку...") }
+                    updateState { copy(recognitionStatus = "Speech service is busy. Retrying...") }
                     listenAgain(delayMillis = 500)
                 }
                 else -> {
-                    updateState { copy(recognitionStatus = "Служба речи прервала распознавание (код $error). Перезапускаю микрофон...") }
+                    updateState { copy(recognitionStatus = "Speech recognition stopped (error $error). Restarting the microphone...") }
                     recreateSpeechRecognizer()
                     listenAgain(delayMillis = 1_000)
                 }
@@ -570,7 +568,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
             speechRecognizer?.cancel()
             recreateSpeechRecognizer()
             updateState {
-                copy(recognitionStatus = "Служба речи не вернула результат. Перезапускаю прослушивание...")
+                copy(recognitionStatus = "Speech service returned no result. Restarting listening...")
             }
             listenAgain(delayMillis = 500)
         }.also { mainHandler.postDelayed(it, RECOGNITION_RESULT_TIMEOUT_MILLIS) }
@@ -602,22 +600,22 @@ class MainActivity : androidx.activity.ComponentActivity() {
                 isActive = !isComplete,
                 reveal = null,
                 feedback = if (isComplete) {
-                    "Вопрос пропущен. Тренировка завершена."
+                    "Question skipped. Practice complete."
                 } else {
-                    "Вопрос пропущен."
+                    "Question skipped."
                 },
                 recognitionStatus = "",
             )
         }
         if (isComplete) {
-            speak("Тренировка завершена.", "ru-RU", ::stopPracticeService)
+            speak("Practice complete.", "en-US", ::stopPracticeService)
         } else {
-            speak("Пропускаю вопрос.", "ru-RU") { beginPrompt() }
+            speak("Skipping question.", "en-US") { beginPrompt() }
         }
     }
 
     private fun retryAfterUnrecognizedSpeech() {
-        updateState { copy(recognitionStatus = "Речь не распознана. Слушаю ещё раз...") }
+        updateState { copy(recognitionStatus = "Speech not recognized. Listening again...") }
         listenAgain()
     }
 
@@ -626,20 +624,20 @@ class MainActivity : androidx.activity.ComponentActivity() {
         val correct = normalizeSpeech(phrase.translation)
         if (alternatives.any { normalizeSpeech(it) == correct }) {
             updateState {
-                copy(feedback = "Правильно.", recognitionStatus = "", reveal = null)
+                copy(feedback = "Correct.", recognitionStatus = "", reveal = null)
             }
-            speak("Правильно.", "ru-RU") {
+            speak("Correct.", "en-US") {
                 val nextIndex = uiState.currentIndex + 1
                 if (nextIndex >= uiState.phrases.size) {
                     updateState {
                         copy(
                             currentIndex = nextIndex,
                             isActive = false,
-                            feedback = "Вы прошли все фразы. Отличная работа!",
+                            feedback = "You completed all phrases. Great job!",
                             recognitionStatus = "",
                         )
                     }
-                    speak("Тренировка завершена.", "ru-RU", ::stopPracticeService)
+                    speak("Practice complete.", "en-US", ::stopPracticeService)
                 } else {
                     updateState { copy(currentIndex = nextIndex, reveal = null) }
                     beginPrompt()
@@ -650,7 +648,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
             updateState {
                 copy(
                     reveal = AnswerReveal(recognized, phrase.translation),
-                    feedback = "Ошибка. Послушайте распознанный ответ и правильный перевод, затем повторите правильный перевод.",
+                    feedback = "Incorrect. Listen to the recognized answer and the correct translation, then try again.",
                     recognitionStatus = "",
                 )
             }
@@ -679,7 +677,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
     private fun speak(text: String, language: String, onFinished: (() -> Unit)? = null) {
         val engine = textToSpeech
         if (engine == null) {
-            updateState { copy(recognitionStatus = "Синтез речи недоступен или ещё не готов. Проверьте службу Text-to-Speech Android.") }
+            updateState { copy(recognitionStatus = "Text-to-speech is unavailable or not ready. Check the Android text-to-speech service.") }
             return
         }
         cancelSpeech()
@@ -691,7 +689,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
         speechContinuation = onFinished
         val result = engine.speak(text, TextToSpeech.QUEUE_FLUSH, null, id)
         if (result == TextToSpeech.ERROR) {
-            updateState { copy(recognitionStatus = "Не удалось запустить синтез речи.") }
+            updateState { copy(recognitionStatus = "Could not start text-to-speech.") }
             finishSpeech(id)
         }
     }
@@ -725,7 +723,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
         updateState {
             copy(
                 isActive = false,
-                recognitionStatus = "Практика остановлена.",
+                recognitionStatus = "Practice stopped.",
             )
         }
         cancelRecognition()
@@ -739,7 +737,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
         cancelRecognition()
         cancelSpeech()
         updateState {
-            copy(recognitionStatus = "Микрофон приостановлен до разблокировки экрана.")
+            copy(recognitionStatus = "Microphone paused until the screen is unlocked.")
         }
     }
 
@@ -760,7 +758,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
             true
         } catch (error: RuntimeException) {
             updateState {
-                copy(recognitionStatus = "Не удалось запустить фоновую голосовую практику: ${error.message}")
+                copy(recognitionStatus = "Could not start background voice practice: ${error.message}")
             }
             false
         }
@@ -780,12 +778,12 @@ class MainActivity : androidx.activity.ComponentActivity() {
         if (uri == null) return@registerForActivityResult
         runCatching {
             contentResolver.openInputStream(uri)?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }
-                ?: error("Не удалось открыть выбранный файл.")
+                ?: error("Could not open the selected file.")
         }.onSuccess { content ->
             runCatching { PhraseParser.parse(content) }
                 .onSuccess { phrases ->
                     if (phrases.isEmpty()) {
-                        updateState { copy(loadStatus = "В файле нет ни одной пары фраз.") }
+                        updateState { copy(loadStatus = "The file contains no phrase pairs.") }
                     } else {
                         stopPractice()
                         updateState {
@@ -794,17 +792,17 @@ class MainActivity : androidx.activity.ComponentActivity() {
                                 phrases = phrases,
                                 currentIndex = 0,
                                 reveal = null,
-                                feedback = "Нажмите «Начать», чтобы запустить голосовую практику.",
-                                loadStatus = "Файл загружен. Фраз: ${phrases.size}. Нажмите «Сохранить список», чтобы использовать его при следующем запуске.",
+                                feedback = "Tap Start Practice to begin.",
+                                loadStatus = "File loaded. Phrases: ${phrases.size}. Tap Save List to use it next time.",
                             )
                         }
                     }
                 }
                 .onFailure { error ->
-                    updateState { copy(loadStatus = "Не удалось загрузить список: ${error.message}") }
+                    updateState { copy(loadStatus = "Could not load the list: ${error.message}") }
                 }
         }.onFailure { error ->
-            updateState { copy(loadStatus = "Не удалось прочитать файл: ${error.message}") }
+            updateState { copy(loadStatus = "Could not read the file: ${error.message}") }
         }
     }
 
@@ -812,7 +810,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
         runCatching { PhraseParser.parse(content) }
             .onSuccess { phrases ->
                 if (phrases.isEmpty()) {
-                    updateState { copy(loadStatus = "Добавьте хотя бы одну пару фраз.") }
+                    updateState { copy(loadStatus = "Add at least one phrase pair.") }
                     return
                 }
                 stopPractice()
@@ -823,13 +821,13 @@ class MainActivity : androidx.activity.ComponentActivity() {
                         phrases = phrases,
                         currentIndex = 0,
                         reveal = null,
-                        loadStatus = "Список сохранён на устройстве. Фраз: ${phrases.size}.",
-                        feedback = "Нажмите «Начать», чтобы запустить голосовую практику.",
+                        loadStatus = "List saved on this device. Phrases: ${phrases.size}.",
+                        feedback = "Tap Start Practice to begin.",
                     )
                 }
             }
             .onFailure { error ->
-                updateState { copy(loadStatus = "Не удалось сохранить список: ${error.message}") }
+                updateState { copy(loadStatus = "Could not save the list: ${error.message}") }
             }
     }
 
@@ -873,7 +871,6 @@ private fun VoicePracticeScreen(
     state: PracticeUiState,
     onStart: () -> Unit,
     onStop: () -> Unit,
-    onRepeat: () -> Unit,
     onImport: () -> Unit,
     onSavePhrases: (String) -> Unit,
     onChooseRussianVoice: (String) -> Unit,
@@ -882,6 +879,8 @@ private fun VoicePracticeScreen(
 ) {
     var editorOpen by remember { mutableStateOf(false) }
     var editorContent by remember(state.sourceText) { mutableStateOf(state.sourceText) }
+    var menuExpanded by remember { mutableStateOf(false) }
+    var settingsOpen by remember { mutableStateOf(false) }
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -895,187 +894,215 @@ private fun VoicePracticeScreen(
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(
-                    modifier = Modifier
-                        .size(34.dp)
-                        .background(Green, CircleShape),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text("V", color = Color.White, fontSize = 21.sp, fontWeight = FontWeight.Medium)
+                if (settingsOpen) {
+                    TextButton(onClick = { settingsOpen = false }) {
+                        Text("← Practice", color = GreenDark)
+                    }
+                } else {
+                    Box {
+                        TextButton(onClick = { menuExpanded = true }) {
+                            Text("☰ Menu", color = GreenDark)
+                        }
+                        DropdownMenu(
+                            expanded = menuExpanded,
+                            onDismissRequest = { menuExpanded = false },
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text("Settings") },
+                                onClick = {
+                                    menuExpanded = false
+                                    settingsOpen = true
+                                },
+                            )
+                        }
+                    }
                 }
-                Spacer(Modifier.width(10.dp))
-                Text("voice practice", color = Ink, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.width(6.dp))
+                Text("Voice Practice", color = Ink, fontSize = 15.sp, fontWeight = FontWeight.Bold)
             }
             Text(
-                text = if (state.isActive) "МИКРОФОН АКТИВЕН" else "RU  →  EN",
+                text = if (state.isActive) "MICROPHONE ACTIVE" else "RU  →  EN",
                 color = if (state.isActive) GreenDark else Muted,
                 fontSize = 10.sp,
                 fontWeight = FontWeight.Bold,
             )
         }
 
-        Card(
-            colors = CardDefaults.cardColors(containerColor = Color.White),
-            shape = RoundedCornerShape(18.dp),
-        ) {
-            Column(
-                modifier = Modifier.padding(22.dp),
-                verticalArrangement = Arrangement.spacedBy(16.dp),
+        if (settingsOpen) {
+            Text("Settings", color = Ink, fontSize = 28.sp, fontFamily = FontFamily.Serif)
+            Card(
+                colors = CardDefaults.cardColors(containerColor = Color.White),
+                shape = RoundedCornerShape(18.dp),
             ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.Bottom,
+                Column(
+                    modifier = Modifier.padding(20.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
-                    Column {
-                        Kicker("01  ·  ГОВОРИТЕ")
-                        Spacer(Modifier.height(8.dp))
-                        Text(
-                            "Переведите вслух.",
-                            color = Ink,
-                            fontSize = 29.sp,
-                            lineHeight = 34.sp,
-                            fontWeight = FontWeight.Normal,
-                            fontFamily = FontFamily.Serif,
-                        )
+                    Kicker("TRAINING")
+                    Text("Practice list", color = Ink, fontSize = 22.sp, fontFamily = FontFamily.Serif)
+                    Text(
+                        "Add one pair per line: a Russian phrase, then | and its English translation. A tab can also be used as the separator.",
+                        color = Muted,
+                        fontSize = 13.sp,
+                        lineHeight = 19.sp,
+                    )
+                    Text(
+                        state.loadStatus,
+                        color = if (
+                            state.loadStatus.startsWith("Could not") ||
+                            state.loadStatus.startsWith("Phrase list error") ||
+                            state.loadStatus.startsWith("The file contains no") ||
+                            state.loadStatus.startsWith("Add at least")
+                        ) Coral else GreenDark,
+                        fontSize = 12.sp,
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        OutlinedButton(onClick = onImport, modifier = Modifier.weight(1f)) {
+                            Text("Import .txt")
+                        }
+                        Button(
+                            onClick = { editorContent = state.sourceText; editorOpen = true },
+                            modifier = Modifier.weight(1f),
+                            colors = ButtonDefaults.buttonColors(containerColor = Green),
+                        ) {
+                            Text("Edit list")
+                        }
                     }
-                    val progress = state.phrases.size.takeIf { it > 0 }?.let {
-                        "${(state.currentIndex + 1).coerceAtMost(it)} из $it"
-                    } ?: "Нет фраз"
-                    Text(progress, color = Muted, fontSize = 12.sp)
                 }
-                LinearProgressIndicator(
-                    progress = if (state.phrases.isEmpty()) 0f else {
-                        (state.currentIndex.toFloat() / state.phrases.size).coerceIn(0f, 1f)
-                    },
-                    modifier = Modifier.fillMaxWidth(),
-                    color = Green,
-                    trackColor = Line,
-                )
-                Text(
-                    text = state.phrases.getOrNull(state.currentIndex)?.prompt
-                        ?: if (state.phrases.isNotEmpty()) "Тренировка завершена" else "Загрузите или добавьте список фраз",
-                    modifier = Modifier.padding(top = 12.dp, bottom = 4.dp),
-                    color = Ink,
-                    fontSize = 35.sp,
-                    lineHeight = 42.sp,
-                    fontFamily = FontFamily.Serif,
-                )
-                state.reveal?.let { answer ->
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .background(Paper, RoundedCornerShape(12.dp))
-                            .padding(14.dp),
-                        verticalArrangement = Arrangement.spacedBy(5.dp),
+            }
+            Card(
+                colors = CardDefaults.cardColors(containerColor = Color.White),
+                shape = RoundedCornerShape(18.dp),
+            ) {
+                Column(
+                    modifier = Modifier.padding(20.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    Kicker("VOICE")
+                    Text("Speech settings", color = Ink, fontSize = 22.sp, fontFamily = FontFamily.Serif)
+                    VoicePicker(
+                        label = "Russian source phrase voice",
+                        voices = state.russianVoices,
+                        selected = state.selectedRussianVoice,
+                        onSelect = onChooseRussianVoice,
+                    )
+                    VoicePicker(
+                        label = "English translation voice",
+                        voices = state.englishVoices,
+                        selected = state.selectedEnglishVoice,
+                        onSelect = onChooseEnglishVoice,
+                    )
+                    RecognitionLanguagePicker(
+                        languages = state.recognitionLanguages,
+                        selected = state.selectedRecognitionLanguage,
+                        enabled = true,
+                        onSelect = onChooseRecognitionLanguage,
+                    )
+                    Text(state.recognitionLanguageStatus, color = Muted, fontSize = 11.sp, lineHeight = 16.sp)
+                    Text(state.voiceStatus, color = Muted, fontSize = 11.sp, lineHeight = 16.sp)
+                }
+            }
+            Text(
+                "Phrase lists and voice settings are stored on this device. Speech recognition depends on the Android speech service and may require an internet connection.",
+                modifier = Modifier.padding(horizontal = 2.dp, vertical = 4.dp),
+                color = Muted,
+                fontSize = 11.sp,
+                lineHeight = 16.sp,
+            )
+        } else {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = Color.White),
+                shape = RoundedCornerShape(18.dp),
+            ) {
+                Column(
+                    modifier = Modifier.padding(22.dp),
+                    verticalArrangement = Arrangement.spacedBy(16.dp),
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.Bottom,
                     ) {
-                        Text("РАСПОЗНАНО", color = Coral, fontSize = 10.sp, fontWeight = FontWeight.Bold)
-                        Text(answer.recognized.ifBlank { "Речь не распознана" }, color = Ink, fontSize = 16.sp)
-                        Spacer(Modifier.height(4.dp))
-                        Text("ПРАВИЛЬНЫЙ ПЕРЕВОД", color = Coral, fontSize = 10.sp, fontWeight = FontWeight.Bold)
-                        Text(answer.expected, color = Ink, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                        Column {
+                            Kicker("SPEAK")
+                            Spacer(Modifier.height(8.dp))
+                            Text(
+                                "Translate aloud.",
+                                color = Ink,
+                                fontSize = 29.sp,
+                                lineHeight = 34.sp,
+                                fontWeight = FontWeight.Normal,
+                                fontFamily = FontFamily.Serif,
+                            )
+                        }
+                        val progress = state.phrases.size.takeIf { it > 0 }?.let {
+                            "${(state.currentIndex + 1).coerceAtMost(it)} of $it"
+                        } ?: "No phrases"
+                        Text(progress, color = Muted, fontSize = 12.sp)
                     }
-                }
-                Text(
-                    state.feedback,
-                    color = when {
-                        state.feedback.startsWith("Правильно") || state.feedback.startsWith("Вы прошли") -> GreenDark
-                        state.reveal != null -> Coral
-                        else -> Muted
-                    },
-                    fontSize = 13.sp,
-                    lineHeight = 19.sp,
-                )
-                if (state.recognitionStatus.isNotBlank()) {
-                    Text(state.recognitionStatus, color = Muted, fontSize = 12.sp, lineHeight = 17.sp)
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    LinearProgressIndicator(
+                        progress = if (state.phrases.isEmpty()) 0f else {
+                            (state.currentIndex.toFloat() / state.phrases.size).coerceIn(0f, 1f)
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        color = Green,
+                        trackColor = Line,
+                    )
+                    Text(
+                        text = state.phrases.getOrNull(state.currentIndex)?.prompt
+                            ?: if (state.phrases.isNotEmpty()) "Practice complete" else "Add or import a phrase list in Settings",
+                        modifier = Modifier.padding(top = 12.dp, bottom = 4.dp),
+                        color = Ink,
+                        fontSize = 26.sp,
+                        lineHeight = 32.sp,
+                        fontFamily = FontFamily.Serif,
+                    )
+                    state.reveal?.let { answer ->
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(Paper, RoundedCornerShape(12.dp))
+                                .padding(14.dp),
+                            verticalArrangement = Arrangement.spacedBy(5.dp),
+                        ) {
+                            Text("RECOGNIZED", color = Coral, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                            Text(answer.recognized.ifBlank { "Speech not recognized" }, color = Ink, fontSize = 16.sp)
+                            Spacer(Modifier.height(4.dp))
+                            Text("CORRECT TRANSLATION", color = Coral, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                            Text(answer.expected, color = Ink, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                        }
+                    }
+                    Text(
+                        state.feedback,
+                        color = when {
+                            state.feedback.startsWith("Correct") || state.feedback.startsWith("You completed") -> GreenDark
+                            state.reveal != null -> Coral
+                            else -> Muted
+                        },
+                        fontSize = 13.sp,
+                        lineHeight = 19.sp,
+                    )
+                    if (state.recognitionStatus.isNotBlank()) {
+                        Text(state.recognitionStatus, color = Muted, fontSize = 12.sp, lineHeight = 17.sp)
+                    }
                     Button(
                         onClick = if (state.isActive) onStop else onStart,
                         enabled = state.phrases.isNotEmpty(),
-                        modifier = Modifier.weight(1f).height(50.dp),
+                        modifier = Modifier.fillMaxWidth().height(50.dp),
                         colors = ButtonDefaults.buttonColors(containerColor = if (state.isActive) Coral else Green),
                         shape = RoundedCornerShape(12.dp),
                     ) {
-                        Text(if (state.isActive) "Остановить" else "Начать практику", fontWeight = FontWeight.SemiBold)
-                    }
-                    OutlinedButton(
-                        onClick = onRepeat,
-                        enabled = state.phrases.getOrNull(state.currentIndex) != null,
-                        modifier = Modifier.height(50.dp),
-                        shape = RoundedCornerShape(12.dp),
-                    ) {
-                        Text("Повторить", color = GreenDark)
+                        Text(if (state.isActive) "Stop" else "Start Practice", fontWeight = FontWeight.SemiBold)
                     }
                 }
             }
         }
-
-        Card(
-            colors = CardDefaults.cardColors(containerColor = Color.White),
-            shape = RoundedCornerShape(18.dp),
-        ) {
-            Column(
-                modifier = Modifier.padding(20.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
-            ) {
-                Kicker("02  ·  ВАШИ ФРАЗЫ")
-                Text("Список для тренировки", color = Ink, fontSize = 22.sp, fontFamily = FontFamily.Serif)
-                Text(
-                    "По одной паре на строку: фраза на русском, затем | и перевод на английском. Поддерживается разделитель Tab.",
-                    color = Muted,
-                    fontSize = 13.sp,
-                    lineHeight = 19.sp,
-                )
-                Text(state.loadStatus, color = if (state.loadStatus.startsWith("Не удалось") || state.loadStatus.startsWith("Ошибка")) Coral else GreenDark, fontSize = 12.sp)
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    OutlinedButton(onClick = onImport, modifier = Modifier.weight(1f)) {
-                        Text("Загрузить .txt")
-                    }
-                    Button(
-                        onClick = { editorContent = state.sourceText; editorOpen = true },
-                        modifier = Modifier.weight(1f),
-                        colors = ButtonDefaults.buttonColors(containerColor = Green),
-                    ) {
-                        Text("Редактировать")
-                    }
-                }
-                VoicePicker(
-                    label = "Озвучивание исходной фразы",
-                    voices = state.russianVoices,
-                    selected = state.selectedRussianVoice,
-                    onSelect = onChooseRussianVoice,
-                )
-                VoicePicker(
-                    label = "Озвучивание английского перевода",
-                    voices = state.englishVoices,
-                    selected = state.selectedEnglishVoice,
-                    onSelect = onChooseEnglishVoice,
-                )
-                RecognitionLanguagePicker(
-                    languages = state.recognitionLanguages,
-                    selected = state.selectedRecognitionLanguage,
-                    enabled = true,
-                    onSelect = onChooseRecognitionLanguage,
-                )
-                Text(state.recognitionLanguageStatus, color = Muted, fontSize = 11.sp, lineHeight = 16.sp)
-                Text(state.voiceStatus, color = Muted, fontSize = 11.sp, lineHeight = 16.sp)
-            }
-        }
-
-        Text(
-            "Фразы и настройки голосов хранятся только на этом устройстве. Распознавание зависит от установленной в Android службы речи и может требовать интернет.",
-            modifier = Modifier.padding(horizontal = 2.dp, vertical = 4.dp),
-            color = Muted,
-            fontSize = 11.sp,
-            lineHeight = 16.sp,
-        )
     }
 
     if (editorOpen) {
         AlertDialog(
             onDismissRequest = { editorOpen = false },
-            title = { Text("Список фраз") },
+            title = { Text("Practice list") },
             text = {
                 OutlinedTextField(
                     value = editorContent,
@@ -1090,10 +1117,10 @@ private fun VoicePracticeScreen(
                 TextButton(onClick = {
                     onSavePhrases(editorContent)
                     editorOpen = false
-                }) { Text("Сохранить список") }
+                }) { Text("Save list") }
             },
             dismissButton = {
-                TextButton(onClick = { editorOpen = false }) { Text("Отмена") }
+                TextButton(onClick = { editorOpen = false }) { Text("Cancel") }
             },
         )
     }
@@ -1121,7 +1148,7 @@ private fun VoicePicker(
                 enabled = voices.isNotEmpty(),
             ) {
                 Text(
-                    text = selected.ifEmpty { "Голос Android по умолчанию" },
+                    text = selected.ifEmpty { "Android default voice" },
                     modifier = Modifier.fillMaxWidth(),
                     textAlign = TextAlign.Start,
                     maxLines = 1,
@@ -1151,7 +1178,7 @@ private fun RecognitionLanguagePicker(
 ) {
     var expanded by remember { mutableStateOf(false) }
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Text("Язык распознавания перевода", color = Ink, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+        Text("English recognition language", color = Ink, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
         Box {
             OutlinedButton(
                 onClick = { expanded = true },
@@ -1182,7 +1209,7 @@ private fun RecognitionLanguagePicker(
 
 private fun recognitionLanguageLabel(languageTag: String): String {
     val displayName = Locale.forLanguageTag(languageTag)
-        .getDisplayName(Locale("ru"))
-        .replaceFirstChar { if (it.isLowerCase()) it.titlecase(Locale("ru")) else it.toString() }
+        .getDisplayName(Locale.ENGLISH)
+        .replaceFirstChar { if (it.isLowerCase()) it.titlecase(Locale.ENGLISH) else it.toString() }
     return "$displayName · $languageTag"
 }

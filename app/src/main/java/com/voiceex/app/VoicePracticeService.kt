@@ -17,7 +17,7 @@ class VoicePracticeService : Service() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 CHANNEL_ID,
-                "Голосовая практика",
+                "Voice Practice",
                 NotificationManager.IMPORTANCE_LOW,
             )
             getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
@@ -39,8 +39,8 @@ class VoicePracticeService : Service() {
     private fun createNotification(): Notification =
         NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
-            .setContentTitle("Голосовая практика")
-            .setContentText("Голосовая практика активна")
+            .setContentTitle("Voice Practice")
+            .setContentText("Voice practice is active")
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
