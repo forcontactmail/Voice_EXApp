@@ -5,6 +5,7 @@ import android.app.Activity
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -153,8 +154,8 @@ class MainActivity : androidx.activity.ComponentActivity() {
                         onStop = ::stopPractice,
                         onImport = ::importPhrases,
                         onSavePhrases = ::savePhrases,
-                        onChooseRussianVoice = { saveVoice("russianVoice", it, true) },
-                        onChooseEnglishVoice = { saveVoice("englishVoice", it, false) },
+                        onChooseRussianVoice = { saveVoice(it, true) },
+                        onChooseEnglishVoice = { saveVoice(it, false) },
                         onChooseRecognitionLanguage = ::saveRecognitionLanguage,
                     )
                 }
@@ -369,8 +370,8 @@ class MainActivity : androidx.activity.ComponentActivity() {
                     .thenBy { it.name },
             )
         val preferences = getPreferences(MODE_PRIVATE)
-        val savedRussian = preferences.getString(RUSSIAN_VOICE_KEY, null)
-        val savedEnglish = preferences.getString(ENGLISH_VOICE_KEY, null)
+        val savedRussian = loadSavedVoice(preferences, RUSSIAN_VOICE_KEY, LEGACY_RUSSIAN_VOICE_KEY)
+        val savedEnglish = loadSavedVoice(preferences, ENGLISH_VOICE_KEY, LEGACY_ENGLISH_VOICE_KEY)
         val russianNames = (russian.map { it.name } + listOfNotNull(savedRussian)).distinct()
         val englishNames = (english.map { it.name } + listOfNotNull(savedEnglish)).distinct()
         val selectedRussian = savedRussian ?: russian.firstOrNull()?.name.orEmpty()
@@ -394,8 +395,29 @@ class MainActivity : androidx.activity.ComponentActivity() {
         }
     }
 
-    private fun saveVoice(key: String, name: String, russian: Boolean) {
-        getPreferences(MODE_PRIVATE).edit().putString(key, name).apply()
+    private fun loadSavedVoice(
+        preferences: SharedPreferences,
+        key: String,
+        legacyKey: String,
+    ): String? {
+        val saved = preferences.getString(key, null)
+        val legacy = preferences.getString(legacyKey, null)
+        if (legacy != null) {
+            preferences.edit().apply {
+                if (saved == null) putString(key, legacy)
+                remove(legacyKey)
+            }.apply()
+        }
+        return saved ?: legacy
+    }
+
+    private fun saveVoice(name: String, russian: Boolean) {
+        val key = if (russian) RUSSIAN_VOICE_KEY else ENGLISH_VOICE_KEY
+        val legacyKey = if (russian) LEGACY_RUSSIAN_VOICE_KEY else LEGACY_ENGLISH_VOICE_KEY
+        getPreferences(MODE_PRIVATE).edit()
+            .putString(key, name)
+            .remove(legacyKey)
+            .apply()
         updateState {
             if (russian) copy(selectedRussianVoice = name, voiceStatus = "Russian voice selection saved.")
             else copy(selectedEnglishVoice = name, voiceStatus = "English voice selection saved.")
@@ -843,6 +865,8 @@ class MainActivity : androidx.activity.ComponentActivity() {
         private const val CURRENT_INDEX_KEY = "voicePractice.currentIndex"
         private const val RUSSIAN_VOICE_KEY = "voicePractice.russianVoice"
         private const val ENGLISH_VOICE_KEY = "voicePractice.englishVoice"
+        private const val LEGACY_RUSSIAN_VOICE_KEY = "russianVoice"
+        private const val LEGACY_ENGLISH_VOICE_KEY = "englishVoice"
         private const val RECOGNITION_LANGUAGE_KEY = "voicePractice.recognitionLanguage"
     }
 }
