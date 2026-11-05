@@ -1,21 +1,12 @@
 package com.voiceex.app
 
 import android.Manifest
-import android.app.Activity
-import android.content.BroadcastReceiver
-import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
-import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.speech.RecognitionListener
-import android.speech.RecognizerIntent
-import android.speech.RecognitionSupport
-import android.speech.RecognitionSupportCallback
-import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -66,9 +57,20 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.lifecycleScope
 import java.util.Locale
 import java.util.UUID
 import kotlin.math.roundToInt
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import org.json.JSONObject
+import org.vosk.Model
+import org.vosk.Recognizer
+import org.vosk.android.RecognitionListener as VoskRecognitionListener
+import org.vosk.android.SpeechService
 
 private val Paper = Color(0xFFF4F6F1)
 private val Ink = Color(0xFF1C2926)
@@ -77,21 +79,10 @@ private val Green = Color(0xFF15765F)
 private val GreenDark = Color(0xFF105B49)
 private val Coral = Color(0xFFC85C47)
 private val Line = Color(0xFFDCE3DC)
-private const val DEFAULT_RECOGNITION_LANGUAGE = "en-US"
 private const val MAX_ANSWER_CHECK_DELAY_HALF_SECONDS = 10
 private const val ANSWER_CHECK_DELAY_STEP_MILLIS = 500L
 private const val DEFAULT_ANSWER_CHECK_DELAY_HALF_SECONDS = 0
-private val COMMON_ENGLISH_RECOGNITION_LANGUAGES = listOf(
-    "en-US",
-    "en-GB",
-    "en-AU",
-    "en-CA",
-    "en-IN",
-    "en-IE",
-    "en-NZ",
-    "en-ZA",
-    "en-SG",
-)
+private const val VOSK_SAMPLE_RATE = 16_000f
 
 private data class AnswerReveal(val recognized: String, val expected: String)
 
@@ -109,9 +100,7 @@ private data class PracticeUiState(
     val englishVoices: List<String> = emptyList(),
     val selectedRussianVoice: String = "",
     val selectedEnglishVoice: String = "",
-    val recognitionLanguages: List<String> = listOf(DEFAULT_RECOGNITION_LANGUAGE),
-    val selectedRecognitionLanguage: String = DEFAULT_RECOGNITION_LANGUAGE,
-    val recognitionLanguageStatus: String = "Loading recognition languages...",
+    val recognitionModelStatus: String = "Preparing offline English model...",
     val voiceStatus: String = "Loading voices...",
     val answerCheckDelayHalfSeconds: Int = DEFAULT_ANSWER_CHECK_DELAY_HALF_SECONDS,
 )
@@ -119,12 +108,13 @@ private data class PracticeUiState(
 class MainActivity : androidx.activity.ComponentActivity() {
     private var uiState by mutableStateOf(PracticeUiState())
     private val mainHandler = Handler(Looper.getMainLooper())
-    private var speechRecognizer: SpeechRecognizer? = null
+    private var voskModel: Model? = null
+    private var voskRecognizer: Recognizer? = null
+    private var speechService: SpeechService? = null
+    private var modelLoadJob: Job? = null
+    private var startAfterModelLoad = false
     private var textToSpeech: TextToSpeech? = null
     private var isListening = false
-    private var awaitingRecognitionResult = false
-    private var recognitionAttemptId = 0L
-    private var recognitionResultTimeout: Runnable? = null
     private var pendingRecognitionRestart: Runnable? = null
     private var pendingAnswerCheck: Runnable? = null
     private var utteranceId: String? = null
@@ -143,7 +133,6 @@ class MainActivity : androidx.activity.ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         loadSavedAnswerCheckDelay()
-        loadSavedRecognitionLanguage()
         initializeSpeech()
         loadSavedPhrases()
         setContent {
@@ -165,7 +154,6 @@ class MainActivity : androidx.activity.ComponentActivity() {
                         onSavePhrases = ::savePhrases,
                         onChooseRussianVoice = { saveVoice(it, true) },
                         onChooseEnglishVoice = { saveVoice(it, false) },
-                        onChooseRecognitionLanguage = ::saveRecognitionLanguage,
                         onAnswerCheckDelayChange = ::saveAnswerCheckDelay,
                     )
                 }
@@ -174,7 +162,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
     }
 
     private fun initializeSpeech() {
-        if (ensureSpeechRecognizer()) loadRecognitionLanguages()
+        loadVoskModel()
 
         textToSpeech = TextToSpeech(this) { result ->
             if (result == TextToSpeech.SUCCESS) {
@@ -195,39 +183,38 @@ class MainActivity : androidx.activity.ComponentActivity() {
         }
     }
 
-    private fun ensureSpeechRecognizer(): Boolean {
-        if (speechRecognizer != null) return true
-        if (!SpeechRecognizer.isRecognitionAvailable(this)) {
-            updateState {
-                copy(
-                    isActive = false,
-                    recognitionStatus = "Speech recognition is unavailable. Install or enable a speech recognition service in Android settings.",
-                )
-            }
-            return false
+    private fun loadVoskModel() {
+        if (voskModel != null || modelLoadJob?.isActive == true) return
+        updateState {
+            copy(
+                recognitionModelStatus = "Preparing the offline English model...",
+                recognitionStatus = if (isActive) "Preparing offline speech recognition..." else recognitionStatus,
+            )
         }
-        return try {
-            speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this)
-            true
-        } catch (error: RuntimeException) {
-            updateState {
-                copy(
-                    isActive = false,
-                    recognitionStatus = "Could not connect to the speech recognition service: ${error.message ?: "service error"}.",
-                )
+        modelLoadJob = lifecycleScope.launch {
+            try {
+                val modelDirectory = withContext(Dispatchers.IO) {
+                    VoskModelInstaller.install(applicationContext)
+                }
+                voskModel = withContext(Dispatchers.IO) { Model(modelDirectory.absolutePath) }
+                updateState { copy(recognitionModelStatus = "Offline English model ready.") }
+                if (startAfterModelLoad) {
+                    startAfterModelLoad = false
+                    requestMicrophoneAndStart()
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                startAfterModelLoad = false
+                val message = error.message ?: "download or model error"
+                updateState {
+                    copy(
+                        recognitionModelStatus = "Could not load the offline English model: $message",
+                        recognitionStatus = if (isActive) "Model loading failed. Tap Start Practice to retry." else recognitionStatus,
+                    )
+                }
             }
-            false
         }
-    }
-
-    private fun loadSavedRecognitionLanguage() {
-        val language = getPreferences(MODE_PRIVATE)
-            .getString(RECOGNITION_LANGUAGE_KEY, DEFAULT_RECOGNITION_LANGUAGE)
-            ?: DEFAULT_RECOGNITION_LANGUAGE
-        uiState = uiState.copy(
-            recognitionLanguages = (COMMON_ENGLISH_RECOGNITION_LANGUAGES + language).distinct(),
-            selectedRecognitionLanguage = language,
-        )
     }
 
     private fun loadSavedAnswerCheckDelay() {
@@ -241,108 +228,6 @@ class MainActivity : androidx.activity.ComponentActivity() {
         val boundedSteps = halfSeconds.coerceIn(0, MAX_ANSWER_CHECK_DELAY_HALF_SECONDS)
         getPreferences(MODE_PRIVATE).edit().putInt(ANSWER_CHECK_DELAY_KEY, boundedSteps).apply()
         updateState { copy(answerCheckDelayHalfSeconds = boundedSteps) }
-    }
-
-    private fun loadRecognitionLanguages() {
-        val recognizer = speechRecognizer ?: return
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
-            }
-            try {
-                recognizer.checkRecognitionSupport(
-                    intent,
-                    ContextCompat.getMainExecutor(this),
-                    object : RecognitionSupportCallback {
-                        override fun onSupportResult(recognitionSupport: RecognitionSupport) {
-                            val languages = (
-                                recognitionSupport.onlineLanguages +
-                                    recognitionSupport.installedOnDeviceLanguages +
-                                    recognitionSupport.supportedOnDeviceLanguages
-                                ).filterEnglishRecognitionLanguages()
-                            if (languages.isEmpty()) loadRecognitionLanguagesFromBroadcast()
-                            else setRecognitionLanguages(languages)
-                        }
-
-                        override fun onError(error: Int) {
-                            loadRecognitionLanguagesFromBroadcast()
-                        }
-                    },
-                )
-            } catch (_: UnsupportedOperationException) {
-                loadRecognitionLanguagesFromBroadcast()
-            } catch (_: RuntimeException) {
-                loadRecognitionLanguagesFromBroadcast()
-            }
-        } else {
-            loadRecognitionLanguagesFromBroadcast()
-        }
-    }
-
-    private fun loadRecognitionLanguagesFromBroadcast() {
-        val request = Intent(RecognizerIntent.ACTION_GET_LANGUAGE_DETAILS)
-        val receiver = object : BroadcastReceiver() {
-            override fun onReceive(context: Context?, intent: Intent?) {
-                val languages = getResultExtras(true)
-                    ?.getStringArrayList(RecognizerIntent.EXTRA_SUPPORTED_LANGUAGES)
-                    .orEmpty()
-                    .filterEnglishRecognitionLanguages()
-                setRecognitionLanguages(languages)
-            }
-        }
-        try {
-            sendOrderedBroadcast(
-                request,
-                null,
-                receiver,
-                mainHandler,
-                Activity.RESULT_OK,
-                null,
-                null,
-            )
-        } catch (_: RuntimeException) {
-            setRecognitionLanguages(emptyList())
-        }
-    }
-
-    private fun List<String>.filterEnglishRecognitionLanguages(): List<String> = distinct()
-        .filter { Locale.forLanguageTag(it).language == "en" }
-        .sorted()
-
-    private fun setRecognitionLanguages(languages: List<String>) {
-        val savedLanguage = getPreferences(MODE_PRIVATE)
-            .getString(RECOGNITION_LANGUAGE_KEY, DEFAULT_RECOGNITION_LANGUAGE)
-        val availableLanguages = (
-            COMMON_ENGLISH_RECOGNITION_LANGUAGES +
-                languages +
-                listOfNotNull(savedLanguage)
-            ).distinct()
-        val selectedLanguage = savedLanguage?.takeIf { it in availableLanguages }
-            ?: DEFAULT_RECOGNITION_LANGUAGE.takeIf { it in availableLanguages }
-            ?: availableLanguages.first()
-        getPreferences(MODE_PRIVATE).edit().putString(RECOGNITION_LANGUAGE_KEY, selectedLanguage).apply()
-        updateState {
-            copy(
-                recognitionLanguages = availableLanguages,
-                selectedRecognitionLanguage = selectedLanguage,
-                recognitionLanguageStatus = if (languages.isEmpty()) {
-                    "Choose an English locale. Availability depends on the Android recognition service and installed speech packs."
-                } else {
-                    "Choose an English locale. Support depends on the Android recognition service."
-                },
-            )
-        }
-    }
-
-    private fun saveRecognitionLanguage(language: String) {
-        if (language !in uiState.recognitionLanguages) return
-        getPreferences(MODE_PRIVATE).edit().putString(RECOGNITION_LANGUAGE_KEY, language).apply()
-        updateState { copy(selectedRecognitionLanguage = language) }
-        if (uiState.isActive) {
-            cancelRecognition()
-            startListening(language)
-        }
     }
 
     private fun loadSavedPhrases() {
@@ -449,7 +334,12 @@ class MainActivity : androidx.activity.ComponentActivity() {
     }
 
     private fun requestMicrophoneAndStart() {
-        if (!ensureSpeechRecognizer()) return
+        if (voskModel == null) {
+            startAfterModelLoad = true
+            loadVoskModel()
+            updateState { copy(recognitionStatus = "Preparing offline speech recognition...") }
+            return
+        }
         if (uiState.currentIndex >= uiState.phrases.size) {
             updateState {
                 copy(
@@ -479,125 +369,91 @@ class MainActivity : androidx.activity.ComponentActivity() {
                 recognitionStatus = "Listen to the source phrase...",
             )
         }
-        speak(phrase.prompt, "ru-RU") { startListening(uiState.selectedRecognitionLanguage) }
+        speak(phrase.prompt, "ru-RU") { startListening() }
     }
 
-    private fun startListening(language: String) {
+    private fun startListening() {
         if (!uiState.isActive) return
-        if (!ensureSpeechRecognizer()) return
+        val model = voskModel ?: run {
+            loadVoskModel()
+            return
+        }
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             updateState { copy(recognitionStatus = "Microphone permission is not granted.") }
             return
         }
-        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, language)
-            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 5)
-            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
+        speechService?.let { service ->
+            if (!isListening) {
+                service.setPause(false)
+                isListening = true
+                updateState { copy(recognitionStatus = "Listening for the English translation offline...") }
+            }
+            return
         }
         try {
-            val attemptId = ++recognitionAttemptId
-            speechRecognizer?.setRecognitionListener(createRecognitionListener(attemptId))
+            val recognizer = voskRecognizer ?: Recognizer(model, VOSK_SAMPLE_RATE).also { voskRecognizer = it }
+            val service = SpeechService(recognizer, VOSK_SAMPLE_RATE)
+            speechService = service
             isListening = true
-            awaitingRecognitionResult = false
-            updateState { copy(recognitionStatus = "Starting speech recognition...") }
-            speechRecognizer?.startListening(intent)
-        } catch (error: RuntimeException) {
+            updateState { copy(recognitionStatus = "Listening for the English translation offline...") }
+            val started = service.startListening(object : VoskRecognitionListener {
+                override fun onPartialResult(hypothesis: String) = Unit
+
+                override fun onResult(hypothesis: String) = handleVoskResult(hypothesis)
+
+                override fun onFinalResult(hypothesis: String) = Unit
+
+                override fun onError(error: Exception) {
+                    if (!uiState.isActive) return
+                    isListening = false
+                    disposeSpeechService()
+                    runCatching { voskRecognizer?.reset() }
+                    updateState {
+                        copy(recognitionStatus = "Offline speech recognition failed: ${error.message ?: "audio error"}. Retrying...")
+                    }
+                    listenAgain(delayMillis = 1_000)
+                }
+
+                override fun onTimeout() {
+                    if (!uiState.isActive) return
+                    isListening = false
+                    disposeSpeechService()
+                    runCatching { voskRecognizer?.reset() }
+                    retryAfterUnrecognizedSpeech()
+                }
+            })
+            if (!started) {
+                isListening = false
+                disposeSpeechService()
+                updateState { copy(recognitionStatus = "Could not start offline speech recognition. Retrying...") }
+                listenAgain(delayMillis = 1_000)
+            }
+        } catch (error: Exception) {
             isListening = false
-            updateState { copy(recognitionStatus = "Could not start the microphone. Restarting speech recognition...") }
-            recreateSpeechRecognizer()
+            disposeSpeechService()
+            updateState { copy(recognitionStatus = "Could not start offline speech recognition: ${error.message ?: "audio error"}. Retrying...") }
             listenAgain(delayMillis = 1_000)
         }
     }
 
-    private fun createRecognitionListener(attemptId: Long) = object : RecognitionListener {
-        override fun onReadyForSpeech(params: Bundle?) {
-            if (attemptId != recognitionAttemptId) return
-            isListening = true
-            updateState { copy(recognitionStatus = "Listening for the English translation...") }
+    private fun handleVoskResult(hypothesis: String) {
+        if (!uiState.isActive) return
+        isListening = false
+        speechService?.setPause(true)
+        val transcript = runCatching { JSONObject(hypothesis).optString("text").trim() }
+            .getOrDefault("")
+        if (transcript.isEmpty()) {
+            retryAfterUnrecognizedSpeech()
+        } else {
+            handleRecognition(listOf(transcript))
         }
-
-        override fun onBeginningOfSpeech() {
-            if (attemptId != recognitionAttemptId) return
-            updateState { copy(recognitionStatus = "Speech detected. Recognizing the translation...") }
-        }
-        override fun onRmsChanged(rmsdB: Float) = Unit
-        override fun onBufferReceived(buffer: ByteArray?) = Unit
-        override fun onEndOfSpeech() {
-            if (attemptId != recognitionAttemptId) return
-            isListening = false
-            awaitingRecognitionResult = true
-            if (uiState.isActive) updateState { copy(recognitionStatus = "Processing the translation...") }
-            scheduleRecognitionResultTimeout(attemptId)
-        }
-
-        override fun onError(error: Int) {
-            if (!finishRecognitionAttempt(attemptId)) return
-            isListening = false
-            awaitingRecognitionResult = false
-            if (!uiState.isActive) return
-            when (error) {
-                SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> {
-                    retryAfterUnrecognizedSpeech()
-                }
-                SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS ->
-                    updateState { copy(recognitionStatus = "Allow microphone access for this app in Android settings.") }
-                SpeechRecognizer.ERROR_NETWORK, SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> {
-                    updateState { copy(recognitionStatus = "No connection to the speech recognition service. Retrying...") }
-                    listenAgain(delayMillis = 2_000)
-                }
-                SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED, SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE ->
-                    updateState {
-                        copy(recognitionStatus = "The service does not support ${uiState.selectedRecognitionLanguage}. Choose another recognition language or install its speech pack in Android settings.")
-                    }
-                SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> {
-                    updateState { copy(recognitionStatus = "Speech service is busy. Retrying...") }
-                    listenAgain(delayMillis = 500)
-                }
-                else -> {
-                    updateState { copy(recognitionStatus = "Speech recognition stopped (error $error). Restarting the microphone...") }
-                    recreateSpeechRecognizer()
-                    listenAgain(delayMillis = 1_000)
-                }
-            }
-        }
-
-        override fun onResults(results: Bundle?) {
-            if (!finishRecognitionAttempt(attemptId)) return
-            isListening = false
-            awaitingRecognitionResult = false
-            val alternatives = results
-                ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                .orEmpty()
-            handleRecognition(alternatives)
-        }
-
-        override fun onPartialResults(partialResults: Bundle?) = Unit
-        override fun onEvent(eventType: Int, params: Bundle?) = Unit
     }
 
-    private fun finishRecognitionAttempt(attemptId: Long): Boolean {
-        if (attemptId != recognitionAttemptId) return false
-        recognitionAttemptId++
-        recognitionResultTimeout?.let(mainHandler::removeCallbacks)
-        recognitionResultTimeout = null
-        return true
-    }
-
-    private fun scheduleRecognitionResultTimeout(attemptId: Long) {
-        recognitionResultTimeout?.let(mainHandler::removeCallbacks)
-        recognitionResultTimeout = Runnable {
-            if (attemptId != recognitionAttemptId || !awaitingRecognitionResult || !uiState.isActive) return@Runnable
-            finishRecognitionAttempt(attemptId)
-            awaitingRecognitionResult = false
-            isListening = false
-            speechRecognizer?.cancel()
-            recreateSpeechRecognizer()
-            updateState {
-                copy(recognitionStatus = "Speech service returned no result. Restarting listening...")
-            }
-            listenAgain(delayMillis = 500)
-        }.also { mainHandler.postDelayed(it, RECOGNITION_RESULT_TIMEOUT_MILLIS) }
+    private fun disposeSpeechService() {
+        val service = speechService ?: return
+        speechService = null
+        runCatching { service.stop() }
+        runCatching { service.shutdown() }
     }
 
     private fun handleRecognition(alternatives: List<String>) {
@@ -703,7 +559,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
             "You have answered ${rating.phraseCount} $phraseWord. Your first-try rating is ${rating.percentage} percent."
         }
         updateState { copy(feedback = feedback, recognitionStatus = "") }
-        speak(spokenReport, "en-US") { startListening(uiState.selectedRecognitionLanguage) }
+        speak(spokenReport, "en-US") { startListening() }
     }
 
     private fun clearRating() {
@@ -714,7 +570,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
                 recognitionStatus = "",
             )
         }
-        speak("Rating cleared.", "en-US") { startListening(uiState.selectedRecognitionLanguage) }
+        speak("Rating cleared.", "en-US") { startListening() }
     }
 
     private fun checkAnswer(alternatives: List<String>) {
@@ -757,7 +613,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
                 )
             }
             speak(recognized, "en-US") {
-                speak(phrase.translation, "en-US") { startListening(uiState.selectedRecognitionLanguage) }
+                speak(phrase.translation, "en-US") { startListening() }
             }
         }
     }
@@ -766,16 +622,10 @@ class MainActivity : androidx.activity.ComponentActivity() {
         pendingRecognitionRestart?.let(mainHandler::removeCallbacks)
         pendingRecognitionRestart = Runnable {
             pendingRecognitionRestart = null
-            if (uiState.isActive && !isListening && !awaitingRecognitionResult) {
-                startListening(uiState.selectedRecognitionLanguage)
+            if (uiState.isActive && !isListening) {
+                startListening()
             }
         }.also { mainHandler.postDelayed(it, delayMillis) }
-    }
-
-    private fun recreateSpeechRecognizer() {
-        speechRecognizer?.destroy()
-        speechRecognizer = null
-        ensureSpeechRecognizer()
     }
 
     private fun speak(text: String, language: String, onFinished: (() -> Unit)? = null) {
@@ -814,13 +664,10 @@ class MainActivity : androidx.activity.ComponentActivity() {
 
     private fun cancelRecognition() {
         mainHandler.removeCallbacksAndMessages(null)
-        recognitionResultTimeout = null
         pendingRecognitionRestart = null
         pendingAnswerCheck = null
-        recognitionAttemptId++
-        if (isListening || awaitingRecognitionResult) speechRecognizer?.cancel()
         isListening = false
-        awaitingRecognitionResult = false
+        disposeSpeechService()
     }
 
     private fun stopPractice() {
@@ -965,18 +812,20 @@ class MainActivity : androidx.activity.ComponentActivity() {
     }
 
     override fun onDestroy() {
+        modelLoadJob?.cancel()
         cancelRecognition()
         cancelSpeech()
         stopPracticeService()
-        speechRecognizer?.destroy()
-        speechRecognizer = null
+        voskRecognizer?.close()
+        voskRecognizer = null
+        voskModel?.close()
+        voskModel = null
         textToSpeech?.shutdown()
         textToSpeech = null
         super.onDestroy()
     }
 
     companion object {
-        private const val RECOGNITION_RESULT_TIMEOUT_MILLIS = 10_000L
         private const val PHRASES_KEY = "voicePractice.phrases"
         private const val CURRENT_INDEX_KEY = "voicePractice.currentIndex"
         private const val FIRST_TRY_ATTEMPTED_KEY = "voicePractice.firstTryRating.attempted"
@@ -985,7 +834,6 @@ class MainActivity : androidx.activity.ComponentActivity() {
         private const val ENGLISH_VOICE_KEY = "voicePractice.englishVoice"
         private const val LEGACY_RUSSIAN_VOICE_KEY = "russianVoice"
         private const val LEGACY_ENGLISH_VOICE_KEY = "englishVoice"
-        private const val RECOGNITION_LANGUAGE_KEY = "voicePractice.recognitionLanguage"
         private const val ANSWER_CHECK_DELAY_KEY = "voicePractice.answerCheckDelayHalfSeconds"
     }
 }
@@ -999,7 +847,6 @@ private fun VoicePracticeScreen(
     onSavePhrases: (String) -> Unit,
     onChooseRussianVoice: (String) -> Unit,
     onChooseEnglishVoice: (String) -> Unit,
-    onChooseRecognitionLanguage: (String) -> Unit,
     onAnswerCheckDelayChange: (Int) -> Unit,
 ) {
     var editorOpen by remember { mutableStateOf(false) }
@@ -1117,13 +964,14 @@ private fun VoicePracticeScreen(
                         selected = state.selectedEnglishVoice,
                         onSelect = onChooseEnglishVoice,
                     )
-                    RecognitionLanguagePicker(
-                        languages = state.recognitionLanguages,
-                        selected = state.selectedRecognitionLanguage,
-                        enabled = true,
-                        onSelect = onChooseRecognitionLanguage,
+                    Text("English recognition · Vosk offline model", color = Ink, fontSize = 12.sp)
+                    Text(
+                        "The English (US) model downloads once (about 41 MB). Recognition then works without internet.",
+                        color = Muted,
+                        fontSize = 11.sp,
+                        lineHeight = 16.sp,
                     )
-                    Text(state.recognitionLanguageStatus, color = Muted, fontSize = 11.sp, lineHeight = 16.sp)
+                    Text(state.recognitionModelStatus, color = Muted, fontSize = 11.sp, lineHeight = 16.sp)
                     Text(state.voiceStatus, color = Muted, fontSize = 11.sp, lineHeight = 16.sp)
                 }
             }
@@ -1169,7 +1017,7 @@ private fun VoicePracticeScreen(
                 }
             }
             Text(
-                "Phrase lists and voice settings are stored on this device. Speech recognition depends on the Android speech service and may require an internet connection.",
+                "Phrase lists and settings are stored on this device. Speech recognition uses the downloaded Vosk English (US) model and works offline.",
                 modifier = Modifier.padding(horizontal = 2.dp, vertical = 4.dp),
                 color = Muted,
                 fontSize = 11.sp,
@@ -1347,49 +1195,4 @@ private fun VoicePicker(
             }
         }
     }
-}
-
-@Composable
-private fun RecognitionLanguagePicker(
-    languages: List<String>,
-    selected: String,
-    enabled: Boolean,
-    onSelect: (String) -> Unit,
-) {
-    var expanded by remember { mutableStateOf(false) }
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Text("English recognition language", color = Ink, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-        Box {
-            OutlinedButton(
-                onClick = { expanded = true },
-                modifier = Modifier.fillMaxWidth(),
-                enabled = enabled && languages.isNotEmpty(),
-            ) {
-                Text(
-                    text = recognitionLanguageLabel(selected),
-                    modifier = Modifier.fillMaxWidth(),
-                    textAlign = TextAlign.Start,
-                    maxLines = 1,
-                )
-            }
-            DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-                languages.forEach { language ->
-                    DropdownMenuItem(
-                        text = { Text(recognitionLanguageLabel(language)) },
-                        onClick = {
-                            onSelect(language)
-                            expanded = false
-                        },
-                    )
-                }
-            }
-        }
-    }
-}
-
-private fun recognitionLanguageLabel(languageTag: String): String {
-    val displayName = Locale.forLanguageTag(languageTag)
-        .getDisplayName(Locale.ENGLISH)
-        .replaceFirstChar { if (it.isLowerCase()) it.titlecase(Locale.ENGLISH) else it.toString() }
-    return "$displayName · $languageTag"
 }
