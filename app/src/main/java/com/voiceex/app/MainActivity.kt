@@ -205,12 +205,17 @@ class MainActivity : androidx.activity.ComponentActivity() {
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {
+                val shouldReportStartFailure = startAfterModelLoad
                 startAfterModelLoad = false
                 val message = error.message ?: "download or model error"
                 updateState {
                     copy(
                         recognitionModelStatus = "Could not load the offline English model: $message",
-                        recognitionStatus = if (isActive) "Model loading failed. Tap Start Practice to retry." else recognitionStatus,
+                        recognitionStatus = if (shouldReportStartFailure) {
+                            "Could not prepare offline speech recognition: $message. Check your internet connection and tap Start Practice to retry."
+                        } else {
+                            recognitionStatus
+                        },
                     )
                 }
             }
