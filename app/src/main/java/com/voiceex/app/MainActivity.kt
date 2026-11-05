@@ -83,6 +83,7 @@ private const val MAX_ANSWER_CHECK_DELAY_HALF_SECONDS = 10
 private const val ANSWER_CHECK_DELAY_STEP_MILLIS = 500L
 private const val DEFAULT_ANSWER_CHECK_DELAY_HALF_SECONDS = 0
 private const val VOSK_SAMPLE_RATE = 16_000f
+private const val VOSK_LISTENING_TIMEOUT_MILLIS = 30_000
 
 private data class AnswerReveal(val recognized: String, val expected: String)
 
@@ -391,7 +392,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
             if (!isListening) {
                 service.setPause(false)
                 isListening = true
-                updateState { copy(recognitionStatus = "Listening for the English translation offline...") }
+                updateState { copy(recognitionStatus = "Listening for the English translation offline. Speak now.") }
             }
             return
         }
@@ -400,9 +401,15 @@ class MainActivity : androidx.activity.ComponentActivity() {
             val service = SpeechService(recognizer, VOSK_SAMPLE_RATE)
             speechService = service
             isListening = true
-            updateState { copy(recognitionStatus = "Listening for the English translation offline...") }
+            updateState { copy(recognitionStatus = "Listening for the English translation offline. Speak now.") }
             val started = service.startListening(object : VoskRecognitionListener {
-                override fun onPartialResult(hypothesis: String) = Unit
+                override fun onPartialResult(hypothesis: String) {
+                    val partial = runCatching { JSONObject(hypothesis).optString("partial").trim() }
+                        .getOrDefault("")
+                    if (uiState.isActive && partial.isNotEmpty()) {
+                        updateState { copy(recognitionStatus = "Recognizing: $partial") }
+                    }
+                }
 
                 override fun onResult(hypothesis: String) = handleVoskResult(hypothesis)
 
@@ -424,9 +431,12 @@ class MainActivity : androidx.activity.ComponentActivity() {
                     isListening = false
                     disposeSpeechService()
                     runCatching { voskRecognizer?.reset() }
-                    retryAfterUnrecognizedSpeech()
+                    updateState {
+                        copy(recognitionStatus = "No speech detected. Check the microphone and try again; restarting listening...")
+                    }
+                    listenAgain(delayMillis = 1_000)
                 }
-            })
+            }, VOSK_LISTENING_TIMEOUT_MILLIS)
             if (!started) {
                 isListening = false
                 disposeSpeechService()
@@ -1063,7 +1073,7 @@ private fun VoicePracticeScreen(
                         ) {
                             Text(progress, color = Muted, fontSize = 12.sp)
                             Text(
-                                "Rating: ${state.firstTryRating.percentage}%",
+                                "${state.firstTryRating.percentage}%",
                                 color = GreenDark,
                                 fontSize = 12.sp,
                                 fontWeight = FontWeight.SemiBold,
