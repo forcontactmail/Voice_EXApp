@@ -10,7 +10,8 @@ import java.util.zip.ZipInputStream
 
 internal object VoskModelInstaller {
     private const val MODEL_NAME = "vosk-model-small-en-us-0.15"
-    private const val MODEL_URL = "https://alphacephei.com/vosk/models/$MODEL_NAME.zip"
+    private const val MODEL_URL =
+        "https://github.com/forcontactmail/Voice_EXApp/releases/download/v1.2.103/$MODEL_NAME.zip"
 
     fun install(context: Context): File {
         val modelDirectory = File(context.filesDir, MODEL_NAME)
