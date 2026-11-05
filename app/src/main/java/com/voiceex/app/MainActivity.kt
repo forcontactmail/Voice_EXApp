@@ -981,7 +981,7 @@ private fun VoicePracticeScreen(
                     )
                     Text("English recognition · Vosk offline model", color = Ink, fontSize = 12.sp)
                     Text(
-                        "The English (US) model downloads once (about 41 MB). Recognition then works without internet.",
+                        "The higher-accuracy English (US) model downloads once (about 128 MB; needs about 210 MB storage). Recognition then works offline.",
                         color = Muted,
                         fontSize = 11.sp,
                         lineHeight = 16.sp,

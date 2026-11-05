@@ -9,13 +9,17 @@ import java.net.URL
 import java.util.zip.ZipInputStream
 
 internal object VoskModelInstaller {
-    private const val MODEL_NAME = "vosk-model-small-en-us-0.15"
+    private const val MODEL_NAME = "vosk-model-en-us-0.22-lgraph"
+    private const val OLD_MODEL_NAME = "vosk-model-small-en-us-0.15"
     private const val MODEL_URL =
-        "https://github.com/forcontactmail/Voice_EXApp/releases/download/v1.2.103/$MODEL_NAME.zip"
+        "https://github.com/forcontactmail/Voice_EXApp/releases/download/v1.2.104/$MODEL_NAME.zip"
 
     fun install(context: Context): File {
         val modelDirectory = File(context.filesDir, MODEL_NAME)
-        if (File(modelDirectory, "am/final.mdl").isFile) return modelDirectory
+        if (File(modelDirectory, "am/final.mdl").isFile) {
+            File(context.filesDir, OLD_MODEL_NAME).deleteRecursively()
+            return modelDirectory
+        }
 
         val stagingDirectory = File(context.filesDir, "$MODEL_NAME.tmp")
         val archive = File(context.cacheDir, "$MODEL_NAME.zip")
@@ -38,6 +42,7 @@ internal object VoskModelInstaller {
             archive.delete()
         }
 
+        File(context.filesDir, OLD_MODEL_NAME).deleteRecursively()
         return modelDirectory
     }
 
@@ -47,7 +52,7 @@ internal object VoskModelInstaller {
         connection.readTimeout = 60_000
         try {
             val expectedLength = connection.contentLengthLong
-            if (expectedLength > 0 && expectedLength > 100L * 1024 * 1024) {
+            if (expectedLength > 0 && expectedLength > 200L * 1024 * 1024) {
                 throw IOException("The English speech model archive is unexpectedly large.")
             }
             var downloadedLength = 0L
