@@ -49,6 +49,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.lightColorScheme
@@ -112,6 +113,11 @@ private data class PracticeUiState(
     val recognitionLanguages: List<String> = listOf(DEFAULT_RECOGNITION_LANGUAGE),
     val selectedRecognitionLanguage: String = DEFAULT_RECOGNITION_LANGUAGE,
     val recognitionLanguageStatus: String = "Loading recognition languages...",
+    val installedOnDeviceLanguages: Set<String> = emptySet(),
+    val recognitionSupportChecked: Boolean = false,
+    val recognitionSupportCheckFailed: Boolean = false,
+    val offlineRecognitionEnabled: Boolean = false,
+    val offlineRecognitionStatus: String = "Checking on-device recognition...",
     val voiceStatus: String = "Loading voices...",
     val answerCheckDelayHalfSeconds: Int = DEFAULT_ANSWER_CHECK_DELAY_HALF_SECONDS,
 )
@@ -120,6 +126,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
     private var uiState by mutableStateOf(PracticeUiState())
     private val mainHandler = Handler(Looper.getMainLooper())
     private var speechRecognizer: SpeechRecognizer? = null
+    private var speechRecognizerIsOnDevice: Boolean? = null
     private var textToSpeech: TextToSpeech? = null
     private var isListening = false
     private var awaitingRecognitionResult = false
@@ -142,8 +149,13 @@ class MainActivity : androidx.activity.ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        getPreferences(MODE_PRIVATE).edit()
+            .remove(FIRST_TRY_ATTEMPTED_KEY)
+            .remove(FIRST_TRY_CORRECT_KEY)
+            .apply()
         loadSavedAnswerCheckDelay()
         loadSavedRecognitionLanguage()
+        loadSavedOfflineRecognition()
         initializeSpeech()
         loadSavedPhrases()
         setContent {
@@ -166,6 +178,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
                         onChooseRussianVoice = { saveVoice(it, true) },
                         onChooseEnglishVoice = { saveVoice(it, false) },
                         onChooseRecognitionLanguage = ::saveRecognitionLanguage,
+                        onOfflineRecognitionChange = ::saveOfflineRecognition,
                         onAnswerCheckDelayChange = ::saveAnswerCheckDelay,
                     )
                 }
@@ -196,18 +209,37 @@ class MainActivity : androidx.activity.ComponentActivity() {
     }
 
     private fun ensureSpeechRecognizer(): Boolean {
-        if (speechRecognizer != null) return true
-        if (!SpeechRecognizer.isRecognitionAvailable(this)) {
+        val useOnDevice = uiState.offlineRecognitionEnabled
+        if (speechRecognizer != null && speechRecognizerIsOnDevice == useOnDevice) return true
+        speechRecognizer?.destroy()
+        speechRecognizer = null
+        speechRecognizerIsOnDevice = null
+        val recognizerAvailable = if (useOnDevice) {
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+                SpeechRecognizer.isOnDeviceRecognitionAvailable(this)
+        } else {
+            SpeechRecognizer.isRecognitionAvailable(this)
+        }
+        if (!recognizerAvailable) {
             updateState {
                 copy(
                     isActive = false,
-                    recognitionStatus = "Speech recognition is unavailable. Install or enable a speech recognition service in Android settings.",
+                    recognitionStatus = if (useOnDevice) {
+                        "On-device speech recognition is unavailable on this device. Turn off Offline recognition or install an on-device recognition service."
+                    } else {
+                        "Speech recognition is unavailable. Install or enable a speech recognition service in Android settings."
+                    },
                 )
             }
             return false
         }
         return try {
-            speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this)
+            speechRecognizer = if (useOnDevice) {
+                SpeechRecognizer.createOnDeviceSpeechRecognizer(this)
+            } else {
+                SpeechRecognizer.createSpeechRecognizer(this)
+            }
+            speechRecognizerIsOnDevice = useOnDevice
             true
         } catch (error: RuntimeException) {
             updateState {
@@ -228,6 +260,79 @@ class MainActivity : androidx.activity.ComponentActivity() {
             recognitionLanguages = (COMMON_ENGLISH_RECOGNITION_LANGUAGES + language).distinct(),
             selectedRecognitionLanguage = language,
         )
+    }
+
+    private fun loadSavedOfflineRecognition() {
+        uiState = uiState.copy(
+            offlineRecognitionEnabled = getPreferences(MODE_PRIVATE)
+                .getBoolean(OFFLINE_RECOGNITION_KEY, false),
+            offlineRecognitionStatus = offlineRecognitionStatus(
+                language = uiState.selectedRecognitionLanguage,
+                installedLanguages = uiState.installedOnDeviceLanguages,
+                supportChecked = uiState.recognitionSupportChecked,
+                supportCheckFailed = uiState.recognitionSupportCheckFailed,
+                sdkInt = Build.VERSION.SDK_INT,
+                recognizerAvailable = isOnDeviceRecognizerAvailable(),
+            ),
+        )
+    }
+
+    private fun isOnDeviceRecognizerAvailable(): Boolean =
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+            SpeechRecognizer.isOnDeviceRecognitionAvailable(this)
+
+    private fun offlineRecognitionStatus(
+        language: String,
+        installedLanguages: Set<String>,
+        supportChecked: Boolean,
+        supportCheckFailed: Boolean,
+        sdkInt: Int,
+        recognizerAvailable: Boolean,
+    ): String = when {
+        sdkInt < Build.VERSION_CODES.TIRAMISU ->
+            "Checking installed offline languages requires Android 13 or later."
+        !recognizerAvailable ->
+            "On-device speech recognition is unavailable on this device."
+        supportCheckFailed ->
+            "Could not verify installed offline languages. Check the Android speech service or turn off Offline recognition."
+        !supportChecked ->
+            "Checking installed on-device languages..."
+        isOnDeviceLanguageAvailable(language, installedLanguages) ->
+            "Offline recognition is ready for $language."
+        else ->
+            "No offline speech pack for $language is installed. Download it in Android language or speech settings."
+    }
+
+    private fun saveOfflineRecognition(enabled: Boolean) {
+        getPreferences(MODE_PRIVATE).edit().putBoolean(OFFLINE_RECOGNITION_KEY, enabled).apply()
+        if (uiState.isActive) cancelRecognition()
+        speechRecognizer?.destroy()
+        speechRecognizer = null
+        speechRecognizerIsOnDevice = null
+        updateState {
+            copy(
+                offlineRecognitionEnabled = enabled,
+                installedOnDeviceLanguages = if (enabled) emptySet() else installedOnDeviceLanguages,
+                recognitionSupportChecked = if (enabled) false else recognitionSupportChecked,
+                recognitionSupportCheckFailed = false,
+                offlineRecognitionStatus = offlineRecognitionStatus(
+                    language = selectedRecognitionLanguage,
+                    installedLanguages = if (enabled) emptySet() else installedOnDeviceLanguages,
+                    supportChecked = if (enabled) false else recognitionSupportChecked,
+                    supportCheckFailed = false,
+                    sdkInt = Build.VERSION.SDK_INT,
+                    recognizerAvailable = isOnDeviceRecognizerAvailable(),
+                ),
+            )
+        }
+        if (ensureSpeechRecognizer()) {
+            loadRecognitionLanguages()
+            if (uiState.isActive && !enabled) {
+                startListening(uiState.selectedRecognitionLanguage)
+            } else if (uiState.isActive && enabled) {
+                updateState { copy(recognitionStatus = "Checking installed offline languages...") }
+            }
+        }
     }
 
     private fun loadSavedAnswerCheckDelay() {
@@ -256,31 +361,49 @@ class MainActivity : androidx.activity.ComponentActivity() {
                     ContextCompat.getMainExecutor(this),
                     object : RecognitionSupportCallback {
                         override fun onSupportResult(recognitionSupport: RecognitionSupport) {
+                            val onDeviceLanguages =
+                                recognitionSupport.installedOnDeviceLanguages
+                                    .filterEnglishRecognitionLanguages()
                             val languages = (
                                 recognitionSupport.onlineLanguages +
-                                    recognitionSupport.installedOnDeviceLanguages +
+                                    onDeviceLanguages +
                                     recognitionSupport.supportedOnDeviceLanguages
                                 ).filterEnglishRecognitionLanguages()
-                            if (languages.isEmpty()) loadRecognitionLanguagesFromBroadcast()
-                            else setRecognitionLanguages(languages)
+                            if (languages.isEmpty()) {
+                                loadRecognitionLanguagesFromBroadcast(supportChecked = true)
+                            } else {
+                                setRecognitionLanguages(languages, onDeviceLanguages.toSet(), supportChecked = true)
+                            }
                         }
 
                         override fun onError(error: Int) {
-                            loadRecognitionLanguagesFromBroadcast()
+                            loadRecognitionLanguagesFromBroadcast(
+                                supportChecked = true,
+                                supportCheckFailed = true,
+                            )
                         }
                     },
                 )
             } catch (_: UnsupportedOperationException) {
-                loadRecognitionLanguagesFromBroadcast()
+                loadRecognitionLanguagesFromBroadcast(
+                    supportChecked = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU,
+                    supportCheckFailed = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU,
+                )
             } catch (_: RuntimeException) {
-                loadRecognitionLanguagesFromBroadcast()
+                loadRecognitionLanguagesFromBroadcast(
+                    supportChecked = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU,
+                    supportCheckFailed = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU,
+                )
             }
         } else {
-            loadRecognitionLanguagesFromBroadcast()
+            loadRecognitionLanguagesFromBroadcast(supportChecked = true)
         }
     }
 
-    private fun loadRecognitionLanguagesFromBroadcast() {
+    private fun loadRecognitionLanguagesFromBroadcast(
+        supportChecked: Boolean = false,
+        supportCheckFailed: Boolean = false,
+    ) {
         val request = Intent(RecognizerIntent.ACTION_GET_LANGUAGE_DETAILS)
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context?, intent: Intent?) {
@@ -288,7 +411,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
                     ?.getStringArrayList(RecognizerIntent.EXTRA_SUPPORTED_LANGUAGES)
                     .orEmpty()
                     .filterEnglishRecognitionLanguages()
-                setRecognitionLanguages(languages)
+                setRecognitionLanguages(languages, emptySet(), supportChecked, supportCheckFailed)
             }
         }
         try {
@@ -302,7 +425,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
                 null,
             )
         } catch (_: RuntimeException) {
-            setRecognitionLanguages(emptyList())
+            setRecognitionLanguages(emptyList(), emptySet(), supportChecked, supportCheckFailed)
         }
     }
 
@@ -310,7 +433,12 @@ class MainActivity : androidx.activity.ComponentActivity() {
         .filter { Locale.forLanguageTag(it).language == "en" }
         .sorted()
 
-    private fun setRecognitionLanguages(languages: List<String>) {
+    private fun setRecognitionLanguages(
+        languages: List<String>,
+        installedOnDeviceLanguages: Set<String> = emptySet(),
+        supportChecked: Boolean = false,
+        supportCheckFailed: Boolean = false,
+    ) {
         val savedLanguage = getPreferences(MODE_PRIVATE)
             .getString(RECOGNITION_LANGUAGE_KEY, DEFAULT_RECOGNITION_LANGUAGE)
         val availableLanguages = (
@@ -326,6 +454,17 @@ class MainActivity : androidx.activity.ComponentActivity() {
             copy(
                 recognitionLanguages = availableLanguages,
                 selectedRecognitionLanguage = selectedLanguage,
+                installedOnDeviceLanguages = installedOnDeviceLanguages,
+                recognitionSupportChecked = supportChecked,
+                recognitionSupportCheckFailed = supportCheckFailed,
+                offlineRecognitionStatus = offlineRecognitionStatus(
+                    language = selectedLanguage,
+                    installedLanguages = installedOnDeviceLanguages,
+                    supportChecked = supportChecked,
+                    supportCheckFailed = supportCheckFailed,
+                    sdkInt = Build.VERSION.SDK_INT,
+                    recognizerAvailable = isOnDeviceRecognizerAvailable(),
+                ),
                 recognitionLanguageStatus = if (languages.isEmpty()) {
                     "Choose an English locale. Availability depends on the Android recognition service and installed speech packs."
                 } else {
@@ -333,12 +472,29 @@ class MainActivity : androidx.activity.ComponentActivity() {
                 },
             )
         }
+        if (uiState.isActive && uiState.offlineRecognitionEnabled) {
+            offlineRecognitionBlockReason(uiState.selectedRecognitionLanguage)?.let { reason ->
+                updateState { copy(recognitionStatus = reason) }
+            } ?: startListening(uiState.selectedRecognitionLanguage)
+        }
     }
 
     private fun saveRecognitionLanguage(language: String) {
         if (language !in uiState.recognitionLanguages) return
         getPreferences(MODE_PRIVATE).edit().putString(RECOGNITION_LANGUAGE_KEY, language).apply()
-        updateState { copy(selectedRecognitionLanguage = language) }
+        updateState {
+            copy(
+                selectedRecognitionLanguage = language,
+                offlineRecognitionStatus = offlineRecognitionStatus(
+                    language = language,
+                    installedLanguages = installedOnDeviceLanguages,
+                    supportChecked = recognitionSupportChecked,
+                    supportCheckFailed = recognitionSupportCheckFailed,
+                    sdkInt = Build.VERSION.SDK_INT,
+                    recognizerAvailable = isOnDeviceRecognizerAvailable(),
+                ),
+            )
+        }
         if (uiState.isActive) {
             cancelRecognition()
             startListening(language)
@@ -366,7 +522,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
                             sourceText = content,
                             phrases = phrases,
                             currentIndex = savedIndex,
-                            firstTryRating = loadSavedFirstTryRating(phrases.size),
+                            firstTryRating = FirstTryRating(),
                             loadStatus = if (saved == null) {
                                 "Sample loaded. Phrases: ${phrases.size}."
                             } else {
@@ -449,6 +605,10 @@ class MainActivity : androidx.activity.ComponentActivity() {
     }
 
     private fun requestMicrophoneAndStart() {
+        offlineRecognitionBlockReason(uiState.selectedRecognitionLanguage)?.let { reason ->
+            updateState { copy(recognitionStatus = reason) }
+            return
+        }
         if (!ensureSpeechRecognizer()) return
         if (uiState.currentIndex >= uiState.phrases.size) {
             updateState {
@@ -484,6 +644,10 @@ class MainActivity : androidx.activity.ComponentActivity() {
 
     private fun startListening(language: String) {
         if (!uiState.isActive) return
+        offlineRecognitionBlockReason(language)?.let { reason ->
+            updateState { copy(recognitionStatus = reason) }
+            return
+        }
         if (!ensureSpeechRecognizer()) return
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             updateState { copy(recognitionStatus = "Microphone permission is not granted.") }
@@ -543,8 +707,14 @@ class MainActivity : androidx.activity.ComponentActivity() {
                 SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS ->
                     updateState { copy(recognitionStatus = "Allow microphone access for this app in Android settings.") }
                 SpeechRecognizer.ERROR_NETWORK, SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> {
-                    updateState { copy(recognitionStatus = "No connection to the speech recognition service. Retrying...") }
-                    listenAgain(delayMillis = 2_000)
+                    if (uiState.offlineRecognitionEnabled) {
+                        updateState {
+                            copy(recognitionStatus = "The on-device recognizer reported a network error. No online recognition was used.")
+                        }
+                    } else {
+                        updateState { copy(recognitionStatus = "No connection to the speech recognition service. Retrying...") }
+                        listenAgain(delayMillis = 2_000)
+                    }
                 }
                 SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED, SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE ->
                     updateState {
@@ -667,6 +837,23 @@ class MainActivity : androidx.activity.ComponentActivity() {
         }
     }
 
+    private fun offlineRecognitionBlockReason(language: String): String? {
+        if (!uiState.offlineRecognitionEnabled) return null
+        return when {
+            Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ->
+                "Offline language checking requires Android 13 or later. Turn off Offline recognition to continue."
+            !isOnDeviceRecognizerAvailable() ->
+                "On-device speech recognition is unavailable on this device. Turn off Offline recognition to continue."
+            uiState.recognitionSupportCheckFailed ->
+                "Could not verify installed offline languages. Check the Android speech service or turn off Offline recognition."
+            !uiState.recognitionSupportChecked ->
+                "Still checking installed offline languages. Try again in a moment."
+            !isOnDeviceLanguageAvailable(language, uiState.installedOnDeviceLanguages) ->
+                "No offline speech pack for $language is installed. Download it in Android language or speech settings, or turn off Offline recognition."
+            else -> null
+        }
+    }
+
     private fun retryAfterUnrecognizedSpeech() {
         updateState { copy(recognitionStatus = "Speech not recognized. Listening again...") }
         listenAgain()
@@ -719,8 +906,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
 
     private fun checkAnswer(alternatives: List<String>) {
         val phrase = uiState.phrases.getOrNull(uiState.currentIndex) ?: return
-        val correct = normalizeAnswer(phrase.translation)
-        if (alternatives.any { normalizeAnswer(it) == correct }) {
+        if (alternatives.any(phrase::acceptsTranslation)) {
             updateState {
                 copy(
                     feedback = "Correct.",
@@ -750,7 +936,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
             val recognized = formatRecognizedAnswer(alternatives.firstOrNull().orEmpty())
             updateState {
                 copy(
-                    reveal = AnswerReveal(recognized, phrase.translation),
+                    reveal = AnswerReveal(recognized, phrase.acceptedTranslations.joinToString(" / ")),
                     feedback = "Incorrect. Listen to the recognized answer and the correct translation, then try again.",
                     recognitionStatus = "",
                     firstTryRating = firstTryRating.recordAnswer(currentIndex, isCorrect = false),
@@ -921,45 +1107,14 @@ class MainActivity : androidx.activity.ComponentActivity() {
             }
     }
 
-    private fun loadSavedFirstTryRating(phraseCount: Int): FirstTryRating {
-        val preferences = getPreferences(MODE_PRIVATE)
-        val validIndexes = 0 until phraseCount
-        val attempted = preferences.getStringSet(FIRST_TRY_ATTEMPTED_KEY, emptySet())
-            .orEmpty()
-            .mapNotNull(String::toIntOrNull)
-            .filter { it in validIndexes }
-            .toSet()
-        val correctFirstTry = preferences.getStringSet(FIRST_TRY_CORRECT_KEY, emptySet())
-            .orEmpty()
-            .mapNotNull(String::toIntOrNull)
-            .filter { it in validIndexes }
-            .toSet()
-        return FirstTryRating.fromIndexes(attempted, correctFirstTry)
-    }
-
     private fun updateState(update: PracticeUiState.() -> PracticeUiState) {
         runOnUiThread {
             val updatedState = uiState.update()
-            val preferences = getPreferences(MODE_PRIVATE)
-            val editor = preferences.edit()
-            var hasPersistenceChanges = false
             if (updatedState.currentIndex != uiState.currentIndex) {
-                editor.putInt(CURRENT_INDEX_KEY, updatedState.currentIndex)
-                hasPersistenceChanges = true
+                getPreferences(MODE_PRIVATE).edit()
+                    .putInt(CURRENT_INDEX_KEY, updatedState.currentIndex)
+                    .apply()
             }
-            if (updatedState.firstTryRating !== uiState.firstTryRating) {
-                editor
-                    .putStringSet(
-                        FIRST_TRY_ATTEMPTED_KEY,
-                        updatedState.firstTryRating.attemptedPhraseIndexes.map(Int::toString).toSet(),
-                    )
-                    .putStringSet(
-                        FIRST_TRY_CORRECT_KEY,
-                        updatedState.firstTryRating.correctFirstTryPhraseIndexes.map(Int::toString).toSet(),
-                    )
-                hasPersistenceChanges = true
-            }
-            if (hasPersistenceChanges) editor.apply()
             uiState = updatedState
         }
     }
@@ -986,6 +1141,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
         private const val LEGACY_RUSSIAN_VOICE_KEY = "russianVoice"
         private const val LEGACY_ENGLISH_VOICE_KEY = "englishVoice"
         private const val RECOGNITION_LANGUAGE_KEY = "voicePractice.recognitionLanguage"
+        private const val OFFLINE_RECOGNITION_KEY = "voicePractice.offlineRecognition"
         private const val ANSWER_CHECK_DELAY_KEY = "voicePractice.answerCheckDelayHalfSeconds"
     }
 }
@@ -1000,6 +1156,7 @@ private fun VoicePracticeScreen(
     onChooseRussianVoice: (String) -> Unit,
     onChooseEnglishVoice: (String) -> Unit,
     onChooseRecognitionLanguage: (String) -> Unit,
+    onOfflineRecognitionChange: (Boolean) -> Unit,
     onAnswerCheckDelayChange: (Int) -> Unit,
 ) {
     var editorOpen by remember { mutableStateOf(false) }
@@ -1066,7 +1223,7 @@ private fun VoicePracticeScreen(
                     Kicker("TRAINING")
                     Text("Practice list", color = Ink, fontSize = 22.sp, fontFamily = FontFamily.Serif)
                     Text(
-                        "Add one pair per line: a Russian phrase, then | and its English translation. A tab can also be used as the separator.",
+                        "Add one Russian phrase per line, then | and its English translation. Add more | separated English translations to accept equivalent answers. Tabs can also separate fields.",
                         color = Muted,
                         fontSize = 13.sp,
                         lineHeight = 19.sp,
@@ -1124,6 +1281,31 @@ private fun VoicePracticeScreen(
                         onSelect = onChooseRecognitionLanguage,
                     )
                     Text(state.recognitionLanguageStatus, color = Muted, fontSize = 11.sp, lineHeight = 16.sp)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Offline recognition", color = Ink, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                            Text(
+                                "Use only an installed on-device speech model.",
+                                color = Muted,
+                                fontSize = 11.sp,
+                                lineHeight = 16.sp,
+                            )
+                        }
+                        Switch(
+                            checked = state.offlineRecognitionEnabled,
+                            onCheckedChange = onOfflineRecognitionChange,
+                        )
+                    }
+                    Text(
+                        state.offlineRecognitionStatus,
+                        color = if (state.offlineRecognitionStatus.startsWith("Offline recognition is ready")) GreenDark else Coral,
+                        fontSize = 11.sp,
+                        lineHeight = 16.sp,
+                    )
                     Text(state.voiceStatus, color = Muted, fontSize = 11.sp, lineHeight = 16.sp)
                 }
             }
@@ -1169,7 +1351,7 @@ private fun VoicePracticeScreen(
                 }
             }
             Text(
-                "Phrase lists and voice settings are stored on this device. Speech recognition depends on the Android speech service and may require an internet connection.",
+                "Phrase lists and voice settings are stored on this device. Online speech recognition may require an internet connection. Offline recognition requires Android 13 or later and an installed speech pack for the selected language. Text-to-speech may also require downloaded voices.",
                 modifier = Modifier.padding(horizontal = 2.dp, vertical = 4.dp),
                 color = Muted,
                 fontSize = 11.sp,

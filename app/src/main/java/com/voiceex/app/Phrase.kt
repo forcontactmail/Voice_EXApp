@@ -3,7 +3,16 @@ package com.voiceex.app
 import java.util.Locale
 import kotlin.math.roundToInt
 
-data class Phrase(val prompt: String, val translation: String)
+data class Phrase(
+    val prompt: String,
+    val translation: String,
+    val acceptedTranslations: List<String> = listOf(translation),
+) {
+    fun acceptsTranslation(answer: String): Boolean {
+        val normalizedAnswer = normalizeAnswer(answer)
+        return acceptedTranslations.any { normalizeAnswer(it) == normalizedAnswer }
+    }
+}
 
 class FirstTryRating private constructor(
     val attemptedPhraseIndexes: Set<Int>,
@@ -32,31 +41,26 @@ class FirstTryRating private constructor(
         )
     }
 
-    companion object {
-        fun fromIndexes(attempted: Set<Int>, correctFirstTry: Set<Int>): FirstTryRating {
-            val validAttempted = attempted.filter { it >= 0 }.toSet()
-            return FirstTryRating(validAttempted, correctFirstTry.intersect(validAttempted))
-        }
-    }
-
 }
 
 object PhraseParser {
     fun parse(content: String): List<Phrase> {
         val lines = content.removePrefix("\uFEFF").lines()
         return lines.mapIndexedNotNull { index, line ->
-            val tabIndex = line.indexOf('\t')
-            val separatorIndex = if (tabIndex >= 0) tabIndex else line.indexOf('|')
-            if (separatorIndex < 0) {
+            val delimiter = when {
+                '\t' in line -> '\t'
+                '|' in line -> '|'
+                else -> null
+            }
+            if (delimiter == null) {
                 if (line.isBlank()) null
                 else throw IllegalArgumentException("Line ${index + 1} is missing a | or tab separator")
             } else {
-                val prompt = line.substring(0, separatorIndex).trim()
-                val translation = line.substring(separatorIndex + 1).trim()
-                if (prompt.isEmpty() || translation.isEmpty()) {
+                val fields = line.split(delimiter).map(String::trim)
+                if (fields.size < 2 || fields.any(String::isEmpty)) {
                     throw IllegalArgumentException("Check the source phrase and translation on line ${index + 1}")
                 }
-                Phrase(prompt, translation)
+                Phrase(fields.first(), fields[1], fields.drop(1))
             }
         }
     }
@@ -105,6 +109,13 @@ fun isRatingCommand(value: String): Boolean =
 
 fun isClearRatingCommand(value: String): Boolean =
     normalizeSpeech(value) == "clear rating"
+
+fun isOnDeviceLanguageAvailable(language: String, installedLanguages: Set<String>): Boolean {
+    val selectedLanguage = Locale.forLanguageTag(language).toLanguageTag()
+    return installedLanguages.any { installed ->
+        Locale.forLanguageTag(installed).toLanguageTag().equals(selectedLanguage, ignoreCase = true)
+    }
+}
 
 sealed interface PhraseNavigationCommand {
     data object FirstPhrase : PhraseNavigationCommand
