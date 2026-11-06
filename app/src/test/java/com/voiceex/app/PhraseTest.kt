@@ -48,9 +48,10 @@ class PhraseTest {
     @Test
     fun normalizesRecognizedSpeechAndDetectsRepeatCommands() {
         assertEquals("i'd like coffee", normalizeSpeech("I’d like, coffee!"))
-        assertTrue(isRepeatCommand("Repeat phrase."))
-        assertTrue(isRepeatCommand("Повтори фразу"))
-        assertFalse(isRepeatCommand("Repeat this phrase"))
+        assertTrue(isRepeatCommand("Repeat question."))
+        assertTrue(isRepeatCommand("Повтори вопрос"))
+        assertFalse(isRepeatCommand("Repeat phrase"))
+        assertFalse(isRepeatCommand("Repeat this question"))
     }
 
     @Test
@@ -123,6 +124,32 @@ class PhraseTest {
     }
 
     @Test
+    fun estimatesCefrFromPhraseComplexityAndSupportsAllLevels() {
+        assertEquals("A1", CefrEstimator.estimate("Open the door."))
+        assertEquals("A2", CefrEstimator.estimate("I usually get up at seven in the morning."))
+        assertEquals("B1", CefrEstimator.estimate("She has been working here for three years."))
+        assertEquals("B1", CefrEstimator.estimate("This house was built in 1961."))
+        assertEquals("C1", CefrEstimator.estimate("If I had known about it yesterday, I would have helped you."))
+        assertEquals(listOf("A1", "A2", "B1", "B2", "C1", "C2"), CefrEstimator.levels)
+    }
+
+    @Test
+    fun computesFirstTryPercentageOnlyFromCorrectAnswers() {
+        val history = PracticeSessionHistory(
+            id = 1,
+            startedAt = 0,
+            endedAt = 10_000,
+            durationSeconds = 10,
+            correctCount = 3,
+            firstTryCount = 2,
+            retryCount = 1,
+        )
+
+        assertEquals(67, history.firstTryPercentage)
+        assertEquals(0, history.copy(correctCount = 0, firstTryCount = 0).firstTryPercentage)
+    }
+
+    @Test
     fun detectsSkipQuestionCommands() {
         assertTrue(isSkipCommand("Skip question."))
         assertTrue(isSkipCommand("Skip"))
@@ -132,19 +159,21 @@ class PhraseTest {
     }
 
     @Test
-    fun detectsNavigationToPreviousPhrases() {
-        assertEquals(PhraseNavigationCommand.PreviousPhrases(1), parsePhraseNavigationCommand("Previous phrase"))
-        assertEquals(PhraseNavigationCommand.PreviousPhrases(3), parsePhraseNavigationCommand("Go back three phrases"))
-        assertEquals(PhraseNavigationCommand.PreviousPhrases(4), parsePhraseNavigationCommand("Go back 4 phrases"))
-        assertEquals(PhraseNavigationCommand.PreviousPhrases(2), parsePhraseNavigationCommand("Previous two phrases"))
-        assertEquals(null, parsePhraseNavigationCommand("Go back zero phrases"))
-        assertEquals(null, parsePhraseNavigationCommand("Previous this phrase"))
+    fun detectsNavigationToPreviousQuestions() {
+        assertEquals(PhraseNavigationCommand.PreviousPhrases(1), parsePhraseNavigationCommand("Previous question"))
+        assertEquals(PhraseNavigationCommand.PreviousPhrases(3), parsePhraseNavigationCommand("Go back three questions"))
+        assertEquals(PhraseNavigationCommand.PreviousPhrases(4), parsePhraseNavigationCommand("Go back 4 questions"))
+        assertEquals(PhraseNavigationCommand.PreviousPhrases(2), parsePhraseNavigationCommand("Previous two questions"))
+        assertEquals(null, parsePhraseNavigationCommand("Go back zero questions"))
+        assertEquals(null, parsePhraseNavigationCommand("Previous this question"))
+        assertEquals(null, parsePhraseNavigationCommand("Previous phrase"))
         assertEquals(null, parsePhraseNavigationCommand("Назад на 4 фразы"))
     }
 
     @Test
-    fun detectsNavigationToFirstPhrase() {
-        assertEquals(PhraseNavigationCommand.FirstPhrase, parsePhraseNavigationCommand("First phrase"))
+    fun detectsNavigationToFirstQuestion() {
+        assertEquals(PhraseNavigationCommand.FirstPhrase, parsePhraseNavigationCommand("First question"))
         assertEquals(PhraseNavigationCommand.FirstPhrase, parsePhraseNavigationCommand("Start from the beginning"))
+        assertEquals(null, parsePhraseNavigationCommand("First phrase"))
     }
 }

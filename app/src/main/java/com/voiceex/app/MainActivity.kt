@@ -7,6 +7,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
+import android.database.sqlite.SQLiteException
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -25,6 +26,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -33,6 +35,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -68,6 +71,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import java.util.Locale
+import java.text.SimpleDateFormat
+import java.util.Date
 import java.util.UUID
 import kotlin.math.roundToInt
 
@@ -120,6 +125,11 @@ private data class PracticeUiState(
     val offlineRecognitionStatus: String = "Checking on-device recognition...",
     val voiceStatus: String = "Loading voices...",
     val answerCheckDelayHalfSeconds: Int = DEFAULT_ANSWER_CHECK_DELAY_HALF_SECONDS,
+    val historySessions: List<PracticeSessionHistory> = emptyList(),
+    val historyDetails: List<SessionQuestionDetail> = emptyList(),
+    val historyDetailTitle: String = "",
+    val historyStatus: String = "",
+    val questionLevelStatus: String = "",
 )
 
 class MainActivity : androidx.activity.ComponentActivity() {
@@ -132,11 +142,16 @@ class MainActivity : androidx.activity.ComponentActivity() {
     private var awaitingRecognitionResult = false
     private var recognitionAttemptId = 0L
     private var recognitionResultTimeout: Runnable? = null
+    private var recognitionStartTimeout: Runnable? = null
+    private var recognitionSupportTimeout: Runnable? = null
+    private var recognitionSupportCheckId = 0L
     private var pendingRecognitionRestart: Runnable? = null
     private var pendingAnswerCheck: Runnable? = null
     private var utteranceId: String? = null
     private var speechContinuation: (() -> Unit)? = null
     private var practiceServiceStarted = false
+    private lateinit var practiceDatabase: PracticeDatabase
+    private var currentSessionId: Long? = null
 
     private val microphonePermission = registerForActivityResult(
         ActivityResultContracts.RequestPermission(),
@@ -149,6 +164,8 @@ class MainActivity : androidx.activity.ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        practiceDatabase = PracticeDatabase(this)
+        practiceDatabase.finishOpenSessions()
         getPreferences(MODE_PRIVATE).edit()
             .remove(FIRST_TRY_ATTEMPTED_KEY)
             .remove(FIRST_TRY_CORRECT_KEY)
@@ -180,6 +197,9 @@ class MainActivity : androidx.activity.ComponentActivity() {
                         onChooseRecognitionLanguage = ::saveRecognitionLanguage,
                         onOfflineRecognitionChange = ::saveOfflineRecognition,
                         onAnswerCheckDelayChange = ::saveAnswerCheckDelay,
+                        onOpenHistory = ::loadHistory,
+                        onChooseQuestionCefr = ::saveQuestionCefr,
+                        onShowHistoryDetails = ::showHistoryDetails,
                     )
                 }
             }
@@ -210,6 +230,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
 
     private fun ensureSpeechRecognizer(): Boolean {
         val useOnDevice = uiState.offlineRecognitionEnabled
+        val wasActive = uiState.isActive
         if (speechRecognizer != null && speechRecognizerIsOnDevice == useOnDevice) return true
         speechRecognizer?.destroy()
         speechRecognizer = null
@@ -231,6 +252,10 @@ class MainActivity : androidx.activity.ComponentActivity() {
                     },
                 )
             }
+            if (wasActive) {
+                stopPracticeService()
+                finishHistorySession()
+            }
             return false
         }
         return try {
@@ -247,6 +272,10 @@ class MainActivity : androidx.activity.ComponentActivity() {
                     isActive = false,
                     recognitionStatus = "Could not connect to the speech recognition service: ${error.message ?: "service error"}.",
                 )
+            }
+            if (wasActive) {
+                stopPracticeService()
+                finishHistorySession()
             }
             false
         }
@@ -351,6 +380,18 @@ class MainActivity : androidx.activity.ComponentActivity() {
     private fun loadRecognitionLanguages() {
         val recognizer = speechRecognizer ?: return
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            recognitionSupportTimeout?.let(mainHandler::removeCallbacks)
+            val checkId = ++recognitionSupportCheckId
+            recognitionSupportTimeout = Runnable {
+                if (checkId != recognitionSupportCheckId) return@Runnable
+                recognitionSupportTimeout = null
+                setRecognitionLanguages(
+                    COMMON_ENGLISH_RECOGNITION_LANGUAGES,
+                    emptySet(),
+                    supportChecked = true,
+                    supportCheckFailed = true,
+                )
+            }.also { mainHandler.postDelayed(it, RECOGNITION_SUPPORT_TIMEOUT_MILLIS) }
             val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
                 putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
@@ -361,6 +402,8 @@ class MainActivity : androidx.activity.ComponentActivity() {
                     ContextCompat.getMainExecutor(this),
                     object : RecognitionSupportCallback {
                         override fun onSupportResult(recognitionSupport: RecognitionSupport) {
+                            if (checkId != recognitionSupportCheckId) return
+                            finishRecognitionSupportCheck()
                             val onDeviceLanguages =
                                 recognitionSupport.installedOnDeviceLanguages
                                     .filterEnglishRecognitionLanguages()
@@ -377,7 +420,11 @@ class MainActivity : androidx.activity.ComponentActivity() {
                         }
 
                         override fun onError(error: Int) {
-                            loadRecognitionLanguagesFromBroadcast(
+                            if (checkId != recognitionSupportCheckId) return
+                            finishRecognitionSupportCheck()
+                            setRecognitionLanguages(
+                                COMMON_ENGLISH_RECOGNITION_LANGUAGES,
+                                emptySet(),
                                 supportChecked = true,
                                 supportCheckFailed = true,
                             )
@@ -385,19 +432,31 @@ class MainActivity : androidx.activity.ComponentActivity() {
                     },
                 )
             } catch (_: UnsupportedOperationException) {
-                loadRecognitionLanguagesFromBroadcast(
-                    supportChecked = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU,
-                    supportCheckFailed = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU,
+                finishRecognitionSupportCheck()
+                setRecognitionLanguages(
+                    COMMON_ENGLISH_RECOGNITION_LANGUAGES,
+                    emptySet(),
+                    supportChecked = true,
+                    supportCheckFailed = true,
                 )
             } catch (_: RuntimeException) {
-                loadRecognitionLanguagesFromBroadcast(
-                    supportChecked = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU,
-                    supportCheckFailed = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU,
+                finishRecognitionSupportCheck()
+                setRecognitionLanguages(
+                    COMMON_ENGLISH_RECOGNITION_LANGUAGES,
+                    emptySet(),
+                    supportChecked = true,
+                    supportCheckFailed = true,
                 )
             }
         } else {
             loadRecognitionLanguagesFromBroadcast(supportChecked = true)
         }
+    }
+
+    private fun finishRecognitionSupportCheck() {
+        recognitionSupportTimeout?.let(mainHandler::removeCallbacks)
+        recognitionSupportTimeout = null
+        recognitionSupportCheckId++
     }
 
     private fun loadRecognitionLanguagesFromBroadcast(
@@ -503,38 +562,39 @@ class MainActivity : androidx.activity.ComponentActivity() {
 
     private fun loadSavedPhrases() {
         val saved = getPreferences(MODE_PRIVATE).getString(PHRASES_KEY, null)
-        val content = saved ?: runCatching {
-            assets.open("phrases.txt").bufferedReader(Charsets.UTF_8).use { it.readText() }
-        }.getOrElse { error ->
-            updateState { copy(loadStatus = "Could not load the sample: ${error.message}") }
-            return
+        runCatching {
+            var phrases = practiceDatabase.loadActiveQuestions()
+            val loadedFromDatabase = phrases.isNotEmpty()
+            if (!loadedFromDatabase) {
+                val content = saved ?: assets.open("phrases.txt")
+                    .bufferedReader(Charsets.UTF_8).use { it.readText() }
+                phrases = practiceDatabase.replaceActiveQuestions(PhraseParser.parse(content))
+            }
+            if (phrases.isEmpty()) {
+                updateState { copy(loadStatus = "The list contains no phrases.") }
+                return
+            }
+            getPreferences(MODE_PRIVATE).edit().remove(PHRASES_KEY).apply()
+            val content = PhraseParser.format(phrases)
+            val savedIndex = getPreferences(MODE_PRIVATE)
+                .getInt(CURRENT_INDEX_KEY, 0)
+                .coerceIn(0, phrases.size)
+            updateState {
+                copy(
+                    sourceText = content,
+                    phrases = phrases,
+                    currentIndex = savedIndex,
+                    firstTryRating = FirstTryRating(),
+                    loadStatus = if (loadedFromDatabase) {
+                        "Question database loaded. Phrases: ${phrases.size}."
+                    } else {
+                        "Sample or saved list imported into the question database. Phrases: ${phrases.size}."
+                    },
+                )
+            }
+        }.onFailure { error ->
+            updateState { copy(loadStatus = "Could not load the question database: ${error.message}") }
         }
-        runCatching { PhraseParser.parse(content) }
-            .onSuccess { phrases ->
-                if (phrases.isEmpty()) {
-                    updateState { copy(loadStatus = "The list contains no phrases.") }
-                } else {
-                    val savedIndex = getPreferences(MODE_PRIVATE)
-                        .getInt(CURRENT_INDEX_KEY, 0)
-                        .coerceIn(0, phrases.size)
-                    updateState {
-                        copy(
-                            sourceText = content,
-                            phrases = phrases,
-                            currentIndex = savedIndex,
-                            firstTryRating = FirstTryRating(),
-                            loadStatus = if (saved == null) {
-                                "Sample loaded. Phrases: ${phrases.size}."
-                            } else {
-                                "Saved list loaded. Phrases: ${phrases.size}."
-                            },
-                        )
-                    }
-                }
-            }
-            .onFailure { error ->
-                updateState { copy(loadStatus = "Phrase list error: ${error.message}") }
-            }
     }
 
     private fun loadVoices() {
@@ -627,15 +687,37 @@ class MainActivity : androidx.activity.ComponentActivity() {
     }
 
     private fun beginPrompt() {
+        if (uiState.phrases.any { it.questionId == null }) {
+            runCatching { practiceDatabase.replaceActiveQuestions(uiState.phrases) }
+                .onSuccess { questions ->
+                    uiState = uiState.copy(
+                        phrases = questions,
+                        sourceText = PhraseParser.format(questions),
+                    )
+                }
+                .onFailure { error ->
+                    updateState { copy(recognitionStatus = "Could not prepare questions for session history: ${error.message}") }
+                    return
+                }
+        }
         val phrase = uiState.phrases.getOrNull(uiState.currentIndex) ?: return
         if (!startPracticeService()) return
+        if (!uiState.isActive && currentSessionId == null) {
+            try {
+                currentSessionId = practiceDatabase.startSession()
+            } catch (error: SQLiteException) {
+                stopPracticeService()
+                updateState { copy(recognitionStatus = "Could not start session history: ${error.message}") }
+                return
+            }
+        }
         cancelRecognition()
         cancelSpeech()
         updateState {
             copy(
                 isActive = true,
                 reveal = null,
-                feedback = "Say the English translation. Voice commands: “Repeat phrase”, “Skip”, “Previous phrase”, “First phrase”, “Rating”, or “Clear rating”.",
+                feedback = "Say the English translation. Voice commands: “Repeat question”, “Skip question”, “Previous question”, “First question”, “Rating”, or “Clear rating”.",
                 recognitionStatus = "Listen to the source phrase...",
             )
         }
@@ -666,6 +748,25 @@ class MainActivity : androidx.activity.ComponentActivity() {
             awaitingRecognitionResult = false
             updateState { copy(recognitionStatus = "Starting speech recognition...") }
             speechRecognizer?.startListening(intent)
+            recognitionStartTimeout?.let(mainHandler::removeCallbacks)
+            recognitionStartTimeout = Runnable {
+                if (attemptId != recognitionAttemptId || !isListening || !uiState.isActive) return@Runnable
+                recognitionAttemptId++
+                recognitionStartTimeout = null
+                isListening = false
+                speechRecognizer?.cancel()
+                if (uiState.offlineRecognitionEnabled) {
+                    updateState {
+                        copy(
+                            recognitionStatus = "The on-device speech service did not respond. Check the installed speech pack or turn off Offline recognition.",
+                        )
+                    }
+                } else {
+                    updateState { copy(recognitionStatus = "Speech service did not respond. Restarting recognition...") }
+                    recreateSpeechRecognizer()
+                    listenAgain(delayMillis = 1_000)
+                }
+            }.also { mainHandler.postDelayed(it, RECOGNITION_START_TIMEOUT_MILLIS) }
         } catch (error: RuntimeException) {
             isListening = false
             updateState { copy(recognitionStatus = "Could not start the microphone. Restarting speech recognition...") }
@@ -677,6 +778,8 @@ class MainActivity : androidx.activity.ComponentActivity() {
     private fun createRecognitionListener(attemptId: Long) = object : RecognitionListener {
         override fun onReadyForSpeech(params: Bundle?) {
             if (attemptId != recognitionAttemptId) return
+            recognitionStartTimeout?.let(mainHandler::removeCallbacks)
+            recognitionStartTimeout = null
             isListening = true
             updateState { copy(recognitionStatus = "Listening for the English translation...") }
         }
@@ -749,6 +852,8 @@ class MainActivity : androidx.activity.ComponentActivity() {
     private fun finishRecognitionAttempt(attemptId: Long): Boolean {
         if (attemptId != recognitionAttemptId) return false
         recognitionAttemptId++
+        recognitionStartTimeout?.let(mainHandler::removeCallbacks)
+        recognitionStartTimeout = null
         recognitionResultTimeout?.let(mainHandler::removeCallbacks)
         recognitionResultTimeout = null
         return true
@@ -815,6 +920,12 @@ class MainActivity : androidx.activity.ComponentActivity() {
     }
 
     private fun skipQuestion() {
+        val phrase = uiState.phrases.getOrNull(uiState.currentIndex)
+        if (phrase != null && phrase.questionId != null) {
+            currentSessionId?.let { sessionId ->
+                recordHistoryChange { practiceDatabase.recordSkippedQuestion(sessionId, phrase.questionId) }
+            }
+        }
         val nextIndex = uiState.currentIndex + 1
         val isComplete = nextIndex >= uiState.phrases.size
         updateState {
@@ -831,6 +942,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
             )
         }
         if (isComplete) {
+            finishHistorySession()
             speak("Practice complete.", "en-US", ::stopPracticeService)
         } else {
             speak("Skipping question.", "en-US") { beginPrompt() }
@@ -907,6 +1019,11 @@ class MainActivity : androidx.activity.ComponentActivity() {
     private fun checkAnswer(alternatives: List<String>) {
         val phrase = uiState.phrases.getOrNull(uiState.currentIndex) ?: return
         if (alternatives.any(phrase::acceptsTranslation)) {
+            phrase.questionId?.let { questionId ->
+                currentSessionId?.let { sessionId ->
+                    recordHistoryChange { practiceDatabase.recordCorrectAnswer(sessionId, questionId) }
+                }
+            }
             updateState {
                 copy(
                     feedback = "Correct.",
@@ -926,6 +1043,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
                             recognitionStatus = "",
                         )
                     }
+                    finishHistorySession()
                     speak("Practice complete.", "en-US", ::stopPracticeService)
                 } else {
                     updateState { copy(currentIndex = nextIndex, reveal = null) }
@@ -933,6 +1051,11 @@ class MainActivity : androidx.activity.ComponentActivity() {
                 }
             }
         } else {
+            phrase.questionId?.let { questionId ->
+                currentSessionId?.let { sessionId ->
+                    recordHistoryChange { practiceDatabase.recordWrongAnswer(sessionId, questionId) }
+                }
+            }
             val recognized = formatRecognizedAnswer(alternatives.firstOrNull().orEmpty())
             updateState {
                 copy(
@@ -1000,7 +1123,9 @@ class MainActivity : androidx.activity.ComponentActivity() {
 
     private fun cancelRecognition() {
         mainHandler.removeCallbacksAndMessages(null)
+        recognitionStartTimeout = null
         recognitionResultTimeout = null
+        finishRecognitionSupportCheck()
         pendingRecognitionRestart = null
         pendingAnswerCheck = null
         recognitionAttemptId++
@@ -1019,6 +1144,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
         cancelRecognition()
         cancelSpeech()
         stopPracticeService()
+        finishHistorySession()
     }
 
     private fun startPracticeService(): Boolean {
@@ -1089,15 +1215,21 @@ class MainActivity : androidx.activity.ComponentActivity() {
                     return
                 }
                 stopPractice()
-                getPreferences(MODE_PRIVATE).edit().putString(PHRASES_KEY, content).apply()
+                runCatching { practiceDatabase.replaceActiveQuestions(phrases) }
+                    .onFailure { error ->
+                        updateState { copy(loadStatus = "Could not save questions to the database: ${error.message}") }
+                        return@onSuccess
+                    }
+                val savedQuestions = practiceDatabase.loadActiveQuestions()
+                getPreferences(MODE_PRIVATE).edit().remove(PHRASES_KEY).apply()
                 updateState {
                     copy(
-                        sourceText = content,
-                        phrases = phrases,
+                        sourceText = PhraseParser.format(savedQuestions),
+                        phrases = savedQuestions,
                         currentIndex = 0,
                         firstTryRating = FirstTryRating(),
                         reveal = null,
-                        loadStatus = "List saved on this device. Phrases: ${phrases.size}.",
+                        loadStatus = "Questions saved to the database. Phrases: ${savedQuestions.size}.",
                         feedback = "Tap Start Practice to begin.",
                     )
                 }
@@ -1105,6 +1237,74 @@ class MainActivity : androidx.activity.ComponentActivity() {
             .onFailure { error ->
                 updateState { copy(loadStatus = "Could not save the list: ${error.message}") }
             }
+    }
+
+    private fun saveQuestionCefr(questionId: Long, cefr: String) {
+        runCatching { practiceDatabase.updateQuestionCefr(questionId, cefr) }
+            .onSuccess { saved ->
+                if (saved) {
+                    updateState {
+                        copy(phrases = phrases.map { phrase ->
+                            if (phrase.questionId == questionId) phrase.copy(cefr = cefr) else phrase
+                        }, questionLevelStatus = "CEFR level saved.")
+                    }
+                } else {
+                    updateState { copy(questionLevelStatus = "Could not update CEFR level for question $questionId.") }
+                }
+            }
+            .onFailure { error ->
+                updateState { copy(questionLevelStatus = "Could not save CEFR level: ${error.message}") }
+            }
+    }
+
+    private fun loadHistory() {
+        runCatching { practiceDatabase.loadHistory() }
+            .onSuccess { sessions ->
+                updateState {
+                    copy(
+                        historySessions = sessions,
+                        historyDetails = emptyList(),
+                        historyDetailTitle = "",
+                        historyStatus = "",
+                    )
+                }
+            }
+            .onFailure { error ->
+                updateState { copy(historyStatus = "Could not load history: ${error.message}") }
+            }
+    }
+
+    private fun showHistoryDetails(sessionId: Long, firstTry: Boolean) {
+        runCatching { practiceDatabase.loadCorrectQuestionDetails(sessionId, firstTry) }
+            .onSuccess { details ->
+                updateState {
+                    copy(
+                        historyDetails = details,
+                        historyDetailTitle = if (firstTry) {
+                            "Correct on the first try"
+                        } else {
+                            "Correct after one or more hints"
+                        },
+                    )
+                }
+            }
+            .onFailure { error ->
+                updateState { copy(historyStatus = "Could not load session details: ${error.message}") }
+            }
+    }
+
+    private fun recordHistoryChange(action: () -> Unit) {
+        try {
+            action()
+        } catch (error: SQLiteException) {
+            updateState { copy(recognitionStatus = "History could not be saved: ${error.message}") }
+        }
+    }
+
+    private fun finishHistorySession() {
+        val sessionId = currentSessionId ?: return
+        currentSessionId = null
+        recordHistoryChange { practiceDatabase.finishSession(sessionId) }
     }
 
     private fun updateState(update: PracticeUiState.() -> PracticeUiState) {
@@ -1120,6 +1320,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
     }
 
     override fun onDestroy() {
+        finishHistorySession()
         cancelRecognition()
         cancelSpeech()
         stopPracticeService()
@@ -1127,10 +1328,13 @@ class MainActivity : androidx.activity.ComponentActivity() {
         speechRecognizer = null
         textToSpeech?.shutdown()
         textToSpeech = null
+        practiceDatabase.close()
         super.onDestroy()
     }
 
     companion object {
+        private const val RECOGNITION_START_TIMEOUT_MILLIS = 10_000L
+        private const val RECOGNITION_SUPPORT_TIMEOUT_MILLIS = 10_000L
         private const val RECOGNITION_RESULT_TIMEOUT_MILLIS = 10_000L
         private const val PHRASES_KEY = "voicePractice.phrases"
         private const val CURRENT_INDEX_KEY = "voicePractice.currentIndex"
@@ -1158,11 +1362,17 @@ private fun VoicePracticeScreen(
     onChooseRecognitionLanguage: (String) -> Unit,
     onOfflineRecognitionChange: (Boolean) -> Unit,
     onAnswerCheckDelayChange: (Int) -> Unit,
+    onOpenHistory: () -> Unit,
+    onChooseQuestionCefr: (Long, String) -> Unit,
+    onShowHistoryDetails: (Long, Boolean) -> Unit,
 ) {
     var editorOpen by remember { mutableStateOf(false) }
     var editorContent by remember(state.sourceText) { mutableStateOf(state.sourceText) }
     var menuExpanded by remember { mutableStateOf(false) }
     var settingsOpen by remember { mutableStateOf(false) }
+    var historyOpen by remember { mutableStateOf(false) }
+    var historyDetailOpen by remember { mutableStateOf(false) }
+    var cefrEditorOpen by remember { mutableStateOf(false) }
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -1176,9 +1386,29 @@ private fun VoicePracticeScreen(
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                if (settingsOpen) {
-                    TextButton(onClick = { settingsOpen = false }) {
-                        Text("← Practice", color = GreenDark)
+                if (settingsOpen || historyOpen || cefrEditorOpen || historyDetailOpen) {
+                    TextButton(onClick = {
+                        when {
+                            historyDetailOpen -> historyDetailOpen = false
+                            cefrEditorOpen -> {
+                                cefrEditorOpen = false
+                                settingsOpen = true
+                            }
+                            else -> {
+                                historyOpen = false
+                                settingsOpen = false
+                            }
+                        }
+                    }) {
+                        Text(
+                            when {
+                                settingsOpen -> "Back"
+                                historyDetailOpen -> "← History"
+                                cefrEditorOpen -> "← Settings"
+                                else -> "← Practice"
+                            },
+                            color = GreenDark,
+                        )
                     }
                 } else {
                     Box {
@@ -1194,6 +1424,15 @@ private fun VoicePracticeScreen(
                                 onClick = {
                                     menuExpanded = false
                                     settingsOpen = true
+                                },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("History") },
+                                onClick = {
+                                    menuExpanded = false
+                                    onOpenHistory()
+                                    historyOpen = true
+                                    historyDetailOpen = false
                                 },
                             )
                         }
@@ -1212,6 +1451,33 @@ private fun VoicePracticeScreen(
 
         if (settingsOpen) {
             Text("Settings", color = Ink, fontSize = 28.sp, fontFamily = FontFamily.Serif)
+            Card(
+                colors = CardDefaults.cardColors(containerColor = Color.White),
+                shape = RoundedCornerShape(18.dp),
+            ) {
+                Column(
+                    modifier = Modifier.padding(20.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Kicker("QUESTION BANK")
+                    Text("CEFR difficulty", color = Ink, fontSize = 22.sp, fontFamily = FontFamily.Serif)
+                    Text(
+                        "Levels are estimated from English phrase complexity. You can adjust any level manually.",
+                        color = Muted,
+                        fontSize = 13.sp,
+                        lineHeight = 19.sp,
+                    )
+                    OutlinedButton(
+                        onClick = {
+                            cefrEditorOpen = true
+                            settingsOpen = false
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text("Edit question levels")
+                    }
+                }
+            }
             Card(
                 colors = CardDefaults.cardColors(containerColor = Color.White),
                 shape = RoundedCornerShape(18.dp),
@@ -1357,6 +1623,28 @@ private fun VoicePracticeScreen(
                 fontSize = 11.sp,
                 lineHeight = 16.sp,
             )
+        } else if (cefrEditorOpen) {
+            QuestionCefrEditor(
+                phrases = state.phrases,
+                status = state.loadStatus,
+                onChooseCefr = onChooseQuestionCefr,
+            )
+        } else if (historyOpen) {
+            if (historyDetailOpen) {
+                HistoryQuestionDetails(
+                    title = state.historyDetailTitle,
+                    questions = state.historyDetails,
+                )
+            } else {
+                PracticeHistoryTable(
+                    sessions = state.historySessions,
+                    status = state.loadStatus,
+                    onShowDetails = { sessionId, firstTry ->
+                        onShowHistoryDetails(sessionId, firstTry)
+                        historyDetailOpen = true
+                    },
+                )
+            }
         } else {
             Card(
                 colors = CardDefaults.cardColors(containerColor = Color.White),
@@ -1371,30 +1659,26 @@ private fun VoicePracticeScreen(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.Bottom,
                     ) {
-                        Column {
-                            Kicker("SPEAK")
-                            Spacer(Modifier.height(8.dp))
-                            Text(
-                                "Translate aloud.",
-                                color = Ink,
-                                fontSize = 29.sp,
-                                lineHeight = 34.sp,
-                                fontWeight = FontWeight.Normal,
-                                fontFamily = FontFamily.Serif,
-                            )
-                        }
-                        val progress = state.phrases.size.takeIf { it > 0 }?.let {
-                            "${(state.currentIndex + 1).coerceAtMost(it)} of $it"
-                        } ?: "No phrases"
+                        val questionProgress = state.phrases.size.takeIf { it > 0 }?.let {
+                            "${(state.currentIndex + 1).coerceAtMost(it)} / $it"
+                        } ?: "0"
                         Column(
+                            modifier = Modifier.weight(1f),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            Text("QUESTIONS", color = Muted, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                            Text(questionProgress, color = Ink, fontSize = 24.sp, fontWeight = FontWeight.SemiBold)
+                        }
+                        Column(
+                            modifier = Modifier.weight(1f),
                             horizontalAlignment = Alignment.End,
                             verticalArrangement = Arrangement.spacedBy(4.dp),
                         ) {
-                            Text(progress, color = Muted, fontSize = 12.sp)
+                            Text("FIRST-TRY CORRECT", color = Muted, fontSize = 10.sp, fontWeight = FontWeight.Bold)
                             Text(
-                                "Rating: ${state.firstTryRating.percentage}%",
+                                "${state.firstTryRating.percentage}%",
                                 color = GreenDark,
-                                fontSize = 12.sp,
+                                fontSize = 24.sp,
                                 fontWeight = FontWeight.SemiBold,
                             )
                         }
@@ -1409,7 +1693,7 @@ private fun VoicePracticeScreen(
                     )
                     Text(
                         text = state.phrases.getOrNull(state.currentIndex)?.prompt
-                            ?: if (state.phrases.isNotEmpty()) "Practice complete" else "Add or import a phrase list in Settings",
+                            ?: if (state.phrases.isNotEmpty()) "Practice complete" else "Add or import a question list in Settings",
                         modifier = Modifier.padding(top = 12.dp, bottom = 4.dp),
                         color = Ink,
                         fontSize = 26.sp,
@@ -1484,6 +1768,215 @@ private fun VoicePracticeScreen(
         )
     }
 }
+
+@Composable
+private fun PracticeHistoryTable(
+    sessions: List<PracticeSessionHistory>,
+    status: String,
+    onShowDetails: (Long, Boolean) -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Text("Practice history", color = Ink, fontSize = 28.sp, fontFamily = FontFamily.Serif)
+        Text(
+            "Correct answers exclude skipped and unanswered questions. Tap a first-try or retry count to inspect its questions.",
+            color = Muted,
+            fontSize = 13.sp,
+            lineHeight = 19.sp,
+        )
+        if (status.isNotBlank()) Text(status, color = Coral, fontSize = 12.sp)
+        if (sessions.isEmpty()) {
+            Text("No completed practice sessions yet.", color = Muted, fontSize = 14.sp)
+        } else {
+            Row(
+                modifier = Modifier
+                    .horizontalScroll(rememberScrollState())
+                    .background(Color.White, RoundedCornerShape(12.dp))
+                    .padding(horizontal = 8.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                HistoryCell("Date", 92.dp, header = true)
+                HistoryCell("Start", 80.dp, header = true)
+                HistoryCell("End", 80.dp, header = true)
+                HistoryCell("Seconds", 76.dp, header = true)
+                HistoryCell("Correct", 72.dp, header = true)
+                HistoryCell("First try", 92.dp, header = true)
+                HistoryCell("With hints", 92.dp, header = true)
+                HistoryCell("First try %", 88.dp, header = true)
+            }
+            sessions.forEach { session ->
+                Row(
+                    modifier = Modifier
+                        .horizontalScroll(rememberScrollState())
+                        .background(Color.White, RoundedCornerShape(12.dp))
+                        .padding(horizontal = 8.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    HistoryCell(formatHistoryDate(session.startedAt, "yyyy-MM-dd"), 92.dp)
+                    HistoryCell(formatHistoryDate(session.startedAt, "HH:mm:ss"), 80.dp)
+                    HistoryCell(formatHistoryDate(session.endedAt, "HH:mm:ss"), 80.dp)
+                    HistoryCell(session.durationSeconds.toString(), 76.dp)
+                    HistoryCell(session.correctCount.toString(), 72.dp)
+                    TextButton(
+                        onClick = { onShowDetails(session.id, true) },
+                        modifier = Modifier.width(92.dp),
+                        contentPadding = PaddingValues(horizontal = 2.dp, vertical = 4.dp),
+                    ) {
+                        Text(session.firstTryCount.toString(), color = GreenDark, textAlign = TextAlign.Center)
+                    }
+                    TextButton(
+                        onClick = { onShowDetails(session.id, false) },
+                        modifier = Modifier.width(92.dp),
+                        contentPadding = PaddingValues(horizontal = 2.dp, vertical = 4.dp),
+                    ) {
+                        Text(session.retryCount.toString(), color = GreenDark, textAlign = TextAlign.Center)
+                    }
+                    HistoryCell("${session.firstTryPercentage}%", 88.dp)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun HistoryQuestionDetails(
+    title: String,
+    questions: List<SessionQuestionDetail>,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Text(title, color = Ink, fontSize = 26.sp, fontFamily = FontFamily.Serif)
+        Text(
+            "ID, question text, CEFR level and number of hints shown.",
+            color = Muted,
+            fontSize = 13.sp,
+        )
+        if (questions.isEmpty()) {
+            Text("There are no questions in this category.", color = Muted, fontSize = 14.sp)
+        } else {
+            Row(
+                modifier = Modifier
+                    .horizontalScroll(rememberScrollState())
+                    .background(Color.White, RoundedCornerShape(12.dp))
+                    .padding(horizontal = 8.dp, vertical = 6.dp),
+            ) {
+                HistoryCell("Question ID", 84.dp, header = true)
+                HistoryCell("Question text", 250.dp, header = true)
+                HistoryCell("CEFR", 72.dp, header = true)
+                HistoryCell("Hints", 72.dp, header = true)
+            }
+            questions.forEach { question ->
+                Row(
+                    modifier = Modifier
+                        .horizontalScroll(rememberScrollState())
+                        .background(Color.White, RoundedCornerShape(12.dp))
+                        .padding(horizontal = 8.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    HistoryCell(question.id.toString(), 84.dp)
+                    HistoryCell(question.text, 250.dp)
+                    HistoryCell(question.cefr, 72.dp)
+                    HistoryCell(question.tipsCount.toString(), 72.dp)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun QuestionCefrEditor(
+    phrases: List<Phrase>,
+    status: String,
+    onChooseCefr: (Long, String) -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Text("Question CEFR levels", color = Ink, fontSize = 28.sp, fontFamily = FontFamily.Serif)
+        Text(
+            "Initial levels are automatic estimates based on translation length and grammar. Change any estimate using its level selector.",
+            color = Muted,
+            fontSize = 13.sp,
+            lineHeight = 19.sp,
+        )
+        if (status.isNotBlank()) {
+            Text(status, color = if (status.startsWith("Could not")) Coral else GreenDark, fontSize = 12.sp)
+        }
+        phrases.forEach { phrase ->
+            Card(
+                colors = CardDefaults.cardColors(containerColor = Color.White),
+                shape = RoundedCornerShape(12.dp),
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Text(
+                        text = phrase.questionId?.toString() ?: "—",
+                        color = Muted,
+                        fontSize = 11.sp,
+                        modifier = Modifier.width(32.dp),
+                    )
+                    Text(
+                        text = phrase.prompt,
+                        color = Ink,
+                        fontSize = 13.sp,
+                        modifier = Modifier.weight(1f),
+                        lineHeight = 17.sp,
+                    )
+                    CEFRCefrPicker(
+                        selected = phrase.cefr,
+                        enabled = phrase.questionId != null,
+                        onSelect = { cefr -> phrase.questionId?.let { onChooseCefr(it, cefr) } },
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CEFRCefrPicker(
+    selected: String,
+    enabled: Boolean,
+    onSelect: (String) -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    Box {
+        OutlinedButton(
+            onClick = { expanded = true },
+            enabled = enabled,
+            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+        ) {
+            Text(selected)
+        }
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            CefrEstimator.levels.forEach { level ->
+                DropdownMenuItem(
+                    text = { Text(level) },
+                    onClick = {
+                        onSelect(level)
+                        expanded = false
+                    },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun HistoryCell(text: String, width: androidx.compose.ui.unit.Dp, header: Boolean = false) {
+    Text(
+        text = text,
+        modifier = Modifier.width(width).padding(horizontal = 3.dp, vertical = 4.dp),
+        color = if (header) GreenDark else Ink,
+        fontSize = if (header) 11.sp else 12.sp,
+        fontWeight = if (header) FontWeight.Bold else FontWeight.Normal,
+        textAlign = TextAlign.Center,
+    )
+}
+
+private fun formatHistoryDate(timestamp: Long, pattern: String): String =
+    SimpleDateFormat(pattern, Locale.getDefault()).format(Date(timestamp))
 
 internal fun answerCheckDelayMillis(halfSecondSteps: Int): Long =
     halfSecondSteps.coerceIn(0, MAX_ANSWER_CHECK_DELAY_HALF_SECONDS) * ANSWER_CHECK_DELAY_STEP_MILLIS

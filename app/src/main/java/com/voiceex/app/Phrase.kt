@@ -7,6 +7,8 @@ data class Phrase(
     val prompt: String,
     val translation: String,
     val acceptedTranslations: List<String> = listOf(translation),
+    val questionId: Long? = null,
+    val cefr: String = CefrEstimator.estimate(translation),
 ) {
     fun acceptsTranslation(answer: String): Boolean {
         val normalizedAnswer = normalizeAnswer(answer)
@@ -64,6 +66,60 @@ object PhraseParser {
             }
         }
     }
+
+    fun format(phrases: List<Phrase>): String = phrases.joinToString("\n") { phrase ->
+        (listOf(phrase.prompt) + phrase.acceptedTranslations).joinToString(" | ")
+    }
+}
+
+object CefrEstimator {
+    val levels = listOf("A1", "A2", "B1", "B2", "C1", "C2")
+    private val irregularParticiples =
+        "built|made|sent|written|given|known|seen|done|taken|told|found|bought|brought|caught|held|left|lost|paid|sold|thought|won|put|read|cut"
+    private val passivePattern =
+        Regex("\\b(?:am|is|are|was|were|be|been|being)\\s+(?:\\w+(?:ed|en)|$irregularParticiples)\\b")
+    private val perfectPattern =
+        Regex("\\b(?:have|has|had)\\s+(?:been\\s+\\w+ing|\\w+(?:ed|en)|$irregularParticiples)\\b")
+    private val modalPerfectPattern =
+        Regex("\\b(?:could|would|should|might|must|can't|cannot)\\s+have\\s+\\w+")
+
+    fun estimate(translation: String): String {
+        val text = translation.lowercase(Locale.US)
+        val words = normalizeSpeech(text).split(" ").filter(String::isNotEmpty)
+        val baseLevel = when {
+            words.size <= 5 -> 0
+            words.size <= 9 -> 1
+            words.size <= 15 -> 2
+            words.size <= 22 -> 3
+            else -> 4
+        }
+        var level = baseLevel
+        if (perfectPattern.containsMatchIn(text) ||
+            Regex("\\b(?:because|although|while|before|after|unless|since|whereas|when)\\b").containsMatchIn(text) ||
+            Regex("\\b(?:who|which|that)\\b").containsMatchIn(text) ||
+            passivePattern.containsMatchIn(text)
+        ) {
+            level = maxOf(level, 2)
+        }
+        if (modalPerfectPattern.containsMatchIn(text) ||
+            Regex("\\bif\\b.*\\b(?:would|could|might)\\b").containsMatchIn(text) ||
+            Regex("\\b(?:looking forward to|used to|in order to)\\b").containsMatchIn(text)
+        ) {
+            level = maxOf(level, 3)
+        }
+        if (Regex("\\b(?:wish|if)\\b.*\\b(?:had|were)\\b.*\\b(?:would|could|might|wish)\\b").containsMatchIn(text) ||
+            Regex("\\b(?:would|could|should|might) have been \\w+ing\\b").containsMatchIn(text)
+        ) {
+            level = maxOf(level, 4)
+        }
+        val longWordRatio = words.count { it.length >= 10 }.toFloat() / words.size.coerceAtLeast(1)
+        if (words.size >= 30 && longWordRatio >= 0.2f &&
+            (passivePattern.containsMatchIn(text) || perfectPattern.containsMatchIn(text))
+        ) {
+            level = 5
+        }
+        return levels[level]
+    }
 }
 
 fun normalizeSpeech(value: String): String =
@@ -84,11 +140,11 @@ fun formatRecognizedAnswer(value: String): String =
 
 fun isRepeatCommand(value: String): Boolean =
     normalizeSpeech(value) in setOf(
-        "повтори фразу",
+        "повтори вопрос",
         "повтори",
-        "повторить фразу",
+        "повторить вопрос",
         "повторить",
-        "repeat phrase",
+        "repeat question",
         "repeat",
     )
 
@@ -136,15 +192,15 @@ private val spokenPhraseCounts = mapOf(
 )
 
 private val englishPreviousPhrasesPattern =
-    Regex("^(?:(?:go )?back|previous|go to previous|return to previous) (.+) (?:phrases?|questions?)$")
+    Regex("^(?:(?:go )?back|previous|go to previous|return to previous) (.+) questions?$")
 
 fun parsePhraseNavigationCommand(value: String): PhraseNavigationCommand? {
     val normalized = normalizeSpeech(value)
     if (normalized in setOf(
-            "first phrase",
             "first question",
-            "go to first phrase",
-            "go to the first phrase",
+            "first question",
+            "go to first question",
+            "go to the first question",
             "start from the beginning",
         )
     ) {
@@ -153,12 +209,12 @@ fun parsePhraseNavigationCommand(value: String): PhraseNavigationCommand? {
 
     if (normalized in setOf(
             "previous",
-            "previous phrase",
+            "previous question",
             "previous question",
             "go back",
-            "go back one phrase",
+            "go back one question",
             "back",
-            "back one phrase",
+            "back one question",
         )
     ) {
         return PhraseNavigationCommand.PreviousPhrases(1)

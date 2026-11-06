@@ -16,18 +16,20 @@ Allow microphone access when prompted. Online speech recognition may require an 
 
 During practice, a persistent Android notification indicates that the voice practice is active. Microphone listening continues while the screen is locked; stop the practice in the app to end microphone use and dismiss the notification. Voice commands are recognized in the selected English recognition locale. The current position in the saved phrase list is restored after restarting the app.
 
+Open the hamburger menu and choose **History** to review completed practice sessions. The table shows session date, start/end time, duration, correctly answered questions, first-try and retry counts, and the first-try percentage of correct answers. Tap either answer count to see the questions, their IDs, CEFR levels, and number of hints. Skipped and unanswered questions do not count as correct. Questions and session results are stored in the local SQLite database. CEFR levels are initially estimated from English phrase complexity and can be changed individually under **Settings → Edit question levels**.
+
 ### Voice commands
 
 Say these commands in English (the selected English recognition locale is used):
 
-- **Repeat the current phrase:** “Repeat phrase” or “Repeat”.
-- **Move to the next phrase:** “Skip” or “Skip question”.
-- **Go back one phrase:** “Previous phrase” or “Go back one phrase”.
-- **Go back several phrases:** “Go back three phrases”, “Previous two questions”, or use a number, for example “Go back 4 phrases”. The position stops at the first phrase if the requested number goes past the beginning.
-- **Return to the beginning:** “First phrase” or “Start from the beginning”.
-- **Hear your first-try rating:** “Rating”. The app reports how many unique phrases you have answered and the percentage answered correctly on the first attempt. The rating is kept only for the current app session and resets when you restart the app, change the phrase list, or clear it.
+- **Repeat the current question:** “Repeat question” or “Repeat”.
+- **Move to the next question:** “Skip question” or “Skip”.
+- **Go back one question:** “Previous question” or “Go back one question”.
+- **Go back several questions:** “Go back three questions”, “Previous two questions”, or use a number, for example “Go back 4 questions”. The position stops at the first question if the requested number goes past the beginning.
+- **Return to the beginning:** “First question” or “Start from the beginning”.
+- **Hear your first-try rating:** “Rating”. The app reports how many unique questions you have answered and the percentage answered correctly on the first attempt. The rating is kept only for the current app session and resets when you restart the app, change the question list, or clear it.
 - **Clear your first-try rating:** “Clear rating”. This resets the current statistics so a new rating starts from zero.
 
-Open the hamburger menu and choose **Settings** to import or edit the practice list and configure speech voices. Choose an English locale under **Settings → English recognition language** (US, UK, Australia, Canada, India, Ireland, New Zealand, or Singapore). The selected locale and recognition mode are saved on the device and remain editable during practice; language support depends on the installed Android recognition service and speech packs. Russian and English text-to-speech voices are selected separately; all available English voices are listed. Voice and recognition-language selections are preserved across app restarts. If speech is not recognized or the service times out, the app automatically restarts listening until you stop the practice.
+Open the hamburger menu and choose **Settings** to import or edit the practice list and configure speech voices. Choose an English locale under **Settings → English recognition language** (US, UK, Australia, Canada, India, Ireland, New Zealand, or Singapore). The selected locale and recognition mode are saved on the device and remain editable during practice; language support depends on the installed Android recognition service and speech packs. Russian and English text-to-speech voices are selected separately; all available English voices are listed. Voice and recognition-language selections are preserved across app restarts. If speech is not recognized or the service times out, the app automatically restarts listening until you stop the practice. If offline recognition does not start, it reports a timeout instead of silently switching to online recognition.
 
 Under **Settings → Answer checking**, choose a delay from 0 to 5 seconds in 0.5-second steps before the app evaluates a recognized translation. The selected delay is saved on the device. To accept equivalent translations, add them as additional `|`-separated fields on the same phrase-list line after the primary English translation.
