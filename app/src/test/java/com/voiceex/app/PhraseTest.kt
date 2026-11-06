@@ -80,6 +80,16 @@ class PhraseTest {
     }
 
     @Test
+    fun detectsPracticeModeCommands() {
+        assertTrue(isStartPhrasesCommand("Start Phrases"))
+        assertTrue(isStartPhrasesCommand("Start phrases."))
+        assertFalse(isStartPhrasesCommand("Start Words"))
+        assertTrue(isStartWordsCommand("Start Words"))
+        assertTrue(isStartWordsCommand("Start words."))
+        assertFalse(isStartWordsCommand("Start Phrases"))
+    }
+
+    @Test
     fun answerComparisonIgnoresOptionalOClock() {
         assertEquals(
             "Don't call me at 9, I'll be watching the match.",

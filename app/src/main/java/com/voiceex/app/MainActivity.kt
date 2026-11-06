@@ -105,9 +105,10 @@ private data class PracticeUiState(
     val sourceText: String = "",
     val phrases: List<Phrase> = emptyList(),
     val wordQuestions: List<Phrase> = emptyList(),
+    val isPracticingWords: Boolean = false,
     val currentIndex: Int = 0,
     val isActive: Boolean = false,
-    val feedback: String = "Tap Start Practice to begin.",
+    val feedback: String = "Choose Start Phrases or Start Words to begin.",
     val recognitionStatus: String = "",
     val loadStatus: String = "Loading sample...",
     val firstTryRating: FirstTryRating = FirstTryRating(),
@@ -132,7 +133,10 @@ private data class PracticeUiState(
     val historyStatus: String = "",
     val questionLevelStatus: String = "",
     val dictionaryStatus: String = "",
-)
+) {
+    val activeQuestions: List<Phrase>
+        get() = if (isPracticingWords) wordQuestions else phrases
+}
 
 class MainActivity : androidx.activity.ComponentActivity() {
     private var uiState by mutableStateOf(PracticeUiState())
@@ -190,7 +194,8 @@ class MainActivity : androidx.activity.ComponentActivity() {
                 Surface(modifier = Modifier.fillMaxSize(), color = Paper) {
                     VoicePracticeScreen(
                         state = uiState,
-                        onStart = ::requestMicrophoneAndStart,
+                        onStartPhrases = { requestMicrophoneAndStart(isWords = false) },
+                        onStartWords = { requestMicrophoneAndStart(isWords = true) },
                         onStop = ::stopPractice,
                         onImport = ::importPhrases,
                         onSavePhrases = ::savePhrases,
@@ -677,20 +682,36 @@ class MainActivity : androidx.activity.ComponentActivity() {
         }
     }
 
-    private fun requestMicrophoneAndStart() {
+    private fun requestMicrophoneAndStart(isWords: Boolean) {
+        val questions = if (isWords) uiState.wordQuestions else uiState.phrases
+        if (questions.isEmpty()) {
+            updateState {
+                copy(recognitionStatus = if (isWords) "The word dictionary is empty." else "The phrase list is empty.")
+            }
+            if (uiState.isActive) listenAgain()
+            return
+        }
         offlineRecognitionBlockReason(uiState.selectedRecognitionLanguage)?.let { reason ->
             updateState { copy(recognitionStatus = reason) }
+            if (uiState.isActive) listenAgain()
             return
         }
         if (!ensureSpeechRecognizer()) return
-        if (uiState.currentIndex >= uiState.phrases.size) {
-            updateState {
-                copy(
-                    currentIndex = 0,
-                    feedback = "Starting the practice again.",
-                    reveal = null,
-                )
-            }
+        if (uiState.isActive) {
+            cancelRecognition()
+            cancelSpeech()
+            finishHistorySession()
+        }
+        updateState {
+            copy(
+                isPracticingWords = isWords,
+                currentIndex = 0,
+                isActive = false,
+                firstTryRating = if (isPracticingWords == isWords) firstTryRating else FirstTryRating(),
+                feedback = if (isWords) "Starting word practice." else "Starting phrase practice.",
+                recognitionStatus = "",
+                reveal = null,
+            )
         }
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
             beginPrompt()
@@ -700,20 +721,24 @@ class MainActivity : androidx.activity.ComponentActivity() {
     }
 
     private fun beginPrompt() {
-        if (uiState.phrases.any { it.questionId == null }) {
-            runCatching { practiceDatabase.replaceActiveQuestions(uiState.phrases) }
+        if (uiState.activeQuestions.any { it.questionId == null }) {
+            runCatching { practiceDatabase.replaceActiveQuestions(uiState.activeQuestions) }
                 .onSuccess { questions ->
-                    uiState = uiState.copy(
-                        phrases = questions,
-                        sourceText = PhraseParser.format(questions),
-                    )
+                    uiState = if (uiState.isPracticingWords) {
+                        uiState.copy(wordQuestions = questions)
+                    } else {
+                        uiState.copy(
+                            phrases = questions,
+                            sourceText = PhraseParser.format(questions),
+                        )
+                    }
                 }
                 .onFailure { error ->
                     updateState { copy(recognitionStatus = "Could not prepare questions for session history: ${error.message}") }
                     return
                 }
         }
-        val phrase = uiState.phrases.getOrNull(uiState.currentIndex) ?: return
+        val phrase = uiState.activeQuestions.getOrNull(uiState.currentIndex) ?: return
         if (!startPracticeService()) return
         if (!uiState.isActive && currentSessionId == null) {
             try {
@@ -730,7 +755,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
             copy(
                 isActive = true,
                 reveal = null,
-                feedback = "Say the English translation. Voice commands: “Repeat question”, “Skip question”, “Previous question”, “First question”, “Rating”, or “Clear rating”.",
+                feedback = "Say the English translation. Voice commands: “Start Phrases”, “Start Words”, “Repeat question”, “Skip question”, “Previous question”, “First question”, “Rating”, or “Clear rating”.",
                 recognitionStatus = "Listen to the source phrase...",
             )
         }
@@ -894,6 +919,14 @@ class MainActivity : androidx.activity.ComponentActivity() {
             retryAfterUnrecognizedSpeech()
             return
         }
+        if (alternatives.any(::isStartPhrasesCommand)) {
+            requestMicrophoneAndStart(isWords = false)
+            return
+        }
+        if (alternatives.any(::isStartWordsCommand)) {
+            requestMicrophoneAndStart(isWords = true)
+            return
+        }
         if (alternatives.any(::isRepeatCommand)) {
             beginPrompt()
             return
@@ -933,14 +966,14 @@ class MainActivity : androidx.activity.ComponentActivity() {
     }
 
     private fun skipQuestion() {
-        val phrase = uiState.phrases.getOrNull(uiState.currentIndex)
+        val phrase = uiState.activeQuestions.getOrNull(uiState.currentIndex)
         if (phrase != null && phrase.questionId != null) {
             currentSessionId?.let { sessionId ->
                 recordHistoryChange { practiceDatabase.recordSkippedQuestion(sessionId, phrase.questionId) }
             }
         }
         val nextIndex = uiState.currentIndex + 1
-        val isComplete = nextIndex >= uiState.phrases.size
+        val isComplete = nextIndex >= uiState.activeQuestions.size
         updateState {
             copy(
                 currentIndex = nextIndex,
@@ -1030,7 +1063,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
     }
 
     private fun checkAnswer(alternatives: List<String>) {
-        val phrase = uiState.phrases.getOrNull(uiState.currentIndex) ?: return
+        val phrase = uiState.activeQuestions.getOrNull(uiState.currentIndex) ?: return
         if (alternatives.any(phrase::acceptsTranslation)) {
             phrase.questionId?.let { questionId ->
                 currentSessionId?.let { sessionId ->
@@ -1047,7 +1080,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
             }
             speak("Correct.", "en-US") {
                 val nextIndex = uiState.currentIndex + 1
-                if (nextIndex >= uiState.phrases.size) {
+                if (nextIndex >= uiState.activeQuestions.size) {
                     updateState {
                         copy(
                             currentIndex = nextIndex,
@@ -1206,7 +1239,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
                                 currentIndex = 0,
                                 firstTryRating = FirstTryRating(),
                                 reveal = null,
-                                feedback = "Tap Start Practice to begin.",
+                                feedback = "Choose Start Phrases or Start Words to begin.",
                                 loadStatus = "File loaded. Phrases: ${phrases.size}. Tap Save List to use it next time.",
                             )
                         }
@@ -1243,7 +1276,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
                         firstTryRating = FirstTryRating(),
                         reveal = null,
                         loadStatus = "Questions saved to the database. Phrases: ${savedQuestions.size}.",
-                        feedback = "Tap Start Practice to begin.",
+                        feedback = "Choose Start Phrases or Start Words to begin.",
                     )
                 }
             }
@@ -1414,7 +1447,8 @@ class MainActivity : androidx.activity.ComponentActivity() {
 @Composable
 private fun VoicePracticeScreen(
     state: PracticeUiState,
-    onStart: () -> Unit,
+    onStartPhrases: () -> Unit,
+    onStartWords: () -> Unit,
     onStop: () -> Unit,
     onImport: () -> Unit,
     onSavePhrases: (String) -> Unit,
@@ -1697,14 +1731,19 @@ private fun VoicePracticeScreen(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.Bottom,
                     ) {
-                        val questionProgress = state.phrases.size.takeIf { it > 0 }?.let {
+                        val questionProgress = state.activeQuestions.size.takeIf { it > 0 }?.let {
                             "${(state.currentIndex + 1).coerceAtMost(it)} / $it"
                         } ?: "0"
                         Column(
                             modifier = Modifier.weight(1f),
                             verticalArrangement = Arrangement.spacedBy(4.dp),
                         ) {
-                            Text("QUESTIONS", color = Muted, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                            Text(
+                                if (state.isPracticingWords) "WORDS" else "PHRASES",
+                                color = Muted,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                            )
                             Text(questionProgress, color = Ink, fontSize = 24.sp, fontWeight = FontWeight.SemiBold)
                         }
                         Column(
@@ -1722,16 +1761,18 @@ private fun VoicePracticeScreen(
                         }
                     }
                     LinearProgressIndicator(
-                        progress = if (state.phrases.isEmpty()) 0f else {
-                            (state.currentIndex.toFloat() / state.phrases.size).coerceIn(0f, 1f)
+                        progress = if (state.activeQuestions.isEmpty()) 0f else {
+                            (state.currentIndex.toFloat() / state.activeQuestions.size).coerceIn(0f, 1f)
                         },
                         modifier = Modifier.fillMaxWidth(),
                         color = Green,
                         trackColor = Line,
                     )
                     Text(
-                        text = state.phrases.getOrNull(state.currentIndex)?.prompt
-                            ?: if (state.phrases.isNotEmpty()) "Practice complete" else "Add or import a question list in Settings",
+                        text = state.activeQuestions.getOrNull(state.currentIndex)?.prompt
+                            ?: if (state.activeQuestions.isNotEmpty()) "Practice complete"
+                            else if (state.isPracticingWords) "Add words in Dictionary / CEFR"
+                            else "Add or import phrases in Settings",
                         modifier = Modifier.padding(top = 12.dp, bottom = 4.dp),
                         color = Ink,
                         fontSize = 26.sp,
@@ -1766,14 +1807,39 @@ private fun VoicePracticeScreen(
                     if (state.recognitionStatus.isNotBlank()) {
                         Text(state.recognitionStatus, color = Muted, fontSize = 12.sp, lineHeight = 17.sp)
                     }
-                    Button(
-                        onClick = if (state.isActive) onStop else onStart,
-                        enabled = state.phrases.isNotEmpty(),
-                        modifier = Modifier.fillMaxWidth().height(50.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = if (state.isActive) Coral else Green),
-                        shape = RoundedCornerShape(12.dp),
-                    ) {
-                        Text(if (state.isActive) "Stop" else "Start Practice", fontWeight = FontWeight.SemiBold)
+                    if (state.isActive) {
+                        Button(
+                            onClick = onStop,
+                            modifier = Modifier.fillMaxWidth().height(50.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = Coral),
+                            shape = RoundedCornerShape(12.dp),
+                        ) {
+                            Text("Stop", fontWeight = FontWeight.SemiBold)
+                        }
+                    } else {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        ) {
+                            Button(
+                                onClick = onStartPhrases,
+                                enabled = state.phrases.isNotEmpty(),
+                                modifier = Modifier.weight(1f).height(50.dp),
+                                colors = ButtonDefaults.buttonColors(containerColor = Green),
+                                shape = RoundedCornerShape(12.dp),
+                            ) {
+                                Text("Start Phrases", fontWeight = FontWeight.SemiBold)
+                            }
+                            Button(
+                                onClick = onStartWords,
+                                enabled = state.wordQuestions.isNotEmpty(),
+                                modifier = Modifier.weight(1f).height(50.dp),
+                                colors = ButtonDefaults.buttonColors(containerColor = Green),
+                                shape = RoundedCornerShape(12.dp),
+                            ) {
+                                Text("Start Words", fontWeight = FontWeight.SemiBold)
+                            }
+                        }
                     }
                 }
             }

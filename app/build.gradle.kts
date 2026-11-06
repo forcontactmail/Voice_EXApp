@@ -12,8 +12,8 @@ android {
         applicationId = "com.voiceex.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 120
-        versionName = "1.1.116"
+        versionCode = 121
+        versionName = "1.1.117"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

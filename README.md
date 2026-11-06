@@ -14,7 +14,7 @@ The generated APK is at `app/build/outputs/apk/debug/app-debug.apk`. Download th
 
 Allow microphone access when prompted. Online speech recognition may require an internet connection. To require local processing, enable **Offline recognition** under **Settings**; this uses Android's on-device recognizer and is available only on Android 13 or later when a speech pack is installed for the selected English locale. The app checks installed on-device languages and does not fall back to online recognition in this mode. Text-to-speech voices may also require downloaded voice packs for offline use.
 
-During practice, a persistent Android notification indicates that the voice practice is active. Microphone listening continues while the screen is locked; stop the practice in the app to end microphone use and dismiss the notification. Voice commands are recognized in the selected English recognition locale. The current position in the saved phrase list is restored after restarting the app.
+Choose **Start Phrases** or **Start Words** to practice the matching entries from the SQLite dictionary (`WORD = 0` for phrases and `WORD = 1` for words). During practice, a persistent Android notification indicates that the voice practice is active. Microphone listening continues while the screen is locked; stop the practice in the app to end microphone use and dismiss the notification. Voice commands are recognized in the selected English recognition locale.
 
 Open the hamburger menu and choose **History** to review completed practice sessions. The table shows session date, start/end time, duration, correctly answered questions, first-try and retry counts, and the first-try percentage of correct answers. Tap either answer count to see the questions, their IDs, CEFR levels, and number of hints. Skipped and unanswered questions do not count as correct. Questions and session results are stored in the local SQLite database. Open **Dictionary / CEFR** from the hamburger menu to edit question levels or switch to the word dictionary. The local `Words.txt` asset uses one Russian word, its English translation, and its CEFR level per `|`-separated line; imported words are stored with `WORD = 1`, while phrase questions use `WORD = 0`.
 
@@ -22,6 +22,7 @@ Open the hamburger menu and choose **History** to review completed practice sess
 
 Say these commands in English (the selected English recognition locale is used):
 
+- **Switch practice list:** “Start Phrases” or “Start Words”.
 - **Repeat the current question:** “Repeat question” or “Repeat”.
 - **Move to the next question:** “Skip question” or “Skip”.
 - **Go back one question:** “Previous question” or “Go back one question”.

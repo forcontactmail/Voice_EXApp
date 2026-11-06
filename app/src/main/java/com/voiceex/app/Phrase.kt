@@ -175,6 +175,12 @@ fun isRepeatCommand(value: String): Boolean =
         "repeat",
     )
 
+fun isStartPhrasesCommand(value: String): Boolean =
+    normalizeSpeech(value) == "start phrases"
+
+fun isStartWordsCommand(value: String): Boolean =
+    normalizeSpeech(value) == "start words"
+
 fun isSkipCommand(value: String): Boolean =
     normalizeSpeech(value) in setOf(
         "skip question",
