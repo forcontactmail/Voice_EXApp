@@ -131,7 +131,6 @@ private data class PracticeUiState(
     val historyDetails: List<SessionQuestionDetail> = emptyList(),
     val historyDetailTitle: String = "",
     val historyStatus: String = "",
-    val questionLevelStatus: String = "",
     val dictionaryStatus: String = "",
 ) {
     val activeQuestions: List<Phrase>
@@ -205,9 +204,8 @@ class MainActivity : androidx.activity.ComponentActivity() {
                         onOfflineRecognitionChange = ::saveOfflineRecognition,
                         onAnswerCheckDelayChange = ::saveAnswerCheckDelay,
                         onOpenHistory = ::loadHistory,
-                        onChooseQuestionCefr = ::saveQuestionCefr,
+                        onSaveDictionaryQuestion = ::saveDictionaryQuestion,
                         onShowHistoryDetails = ::showHistoryDetails,
-                        onSaveWords = ::saveWords,
                         onImportWords = ::importWords,
                     )
                 }
@@ -1327,28 +1325,43 @@ class MainActivity : androidx.activity.ComponentActivity() {
             }
     }
 
-    private fun saveQuestionCefr(questionId: Long, cefr: String) {
-        runCatching { practiceDatabase.updateQuestionCefr(questionId, cefr) }
-            .onSuccess { saved ->
-                if (saved) {
-                    updateState {
-                        copy(
-                            phrases = phrases.map { phrase ->
-                                if (phrase.questionId == questionId) phrase.copy(cefr = cefr) else phrase
-                            },
-                            wordQuestions = wordQuestions.map { word ->
-                                if (word.questionId == questionId) word.copy(cefr = cefr) else word
-                            },
-                            questionLevelStatus = "CEFR level saved.",
-                        )
-                    }
-                } else {
-                    updateState { copy(questionLevelStatus = "Could not update CEFR level for question $questionId.") }
+    private fun saveDictionaryQuestion(
+        questionId: Long?,
+        prompt: String,
+        translation: String,
+        cefr: String,
+        isWord: Boolean,
+    ): Boolean {
+        return runCatching {
+            if (questionId == null) {
+                practiceDatabase.addQuestion(prompt, translation, cefr, isWord)
+            } else {
+                check(practiceDatabase.updateQuestion(questionId, prompt, translation, cefr)) {
+                    "Question $questionId no longer exists."
                 }
             }
-            .onFailure { error ->
-                updateState { copy(questionLevelStatus = "Could not save CEFR level: ${error.message}") }
+            practiceDatabase.loadActiveQuestions(isWord)
+        }.onSuccess { questions ->
+            if (!isWord) getPreferences(MODE_PRIVATE).edit().remove(PHRASES_KEY).apply()
+            updateState {
+                copy(
+                    phrases = if (isWord) phrases else questions,
+                    wordQuestions = if (isWord) questions else wordQuestions,
+                    sourceText = if (isWord) sourceText else PhraseParser.format(questions),
+                    loadStatus = if (isWord) loadStatus else "Phrase question ${if (questionId == null) "added" else "saved"}.",
+                    dictionaryStatus = if (isWord) {
+                        "Word ${if (questionId == null) "added to" else "saved in"} the dictionary."
+                    } else {
+                        dictionaryStatus
+                    },
+                )
             }
+        }.onFailure { error ->
+            updateState {
+                if (isWord) copy(dictionaryStatus = "Could not save question: ${error.message}")
+                else copy(loadStatus = "Could not save question: ${error.message}")
+            }
+        }.isSuccess
     }
 
     private fun loadHistory() {
@@ -1458,9 +1471,8 @@ private fun VoicePracticeScreen(
     onOfflineRecognitionChange: (Boolean) -> Unit,
     onAnswerCheckDelayChange: (Int) -> Unit,
     onOpenHistory: () -> Unit,
-    onChooseQuestionCefr: (Long, String) -> Unit,
+    onSaveDictionaryQuestion: (Long?, String, String, String, Boolean) -> Boolean,
     onShowHistoryDetails: (Long, Boolean) -> Unit,
-    onSaveWords: (String) -> Unit,
     onImportWords: () -> Unit,
 ) {
     var editorOpen by remember { mutableStateOf(false) }
@@ -1522,7 +1534,7 @@ private fun VoicePracticeScreen(
                                 },
                             )
                             DropdownMenuItem(
-                                text = { Text("Dictionary / CEFR") },
+                                text = { Text("Dictionary") },
                                 onClick = {
                                     menuExpanded = false
                                     dictionaryOpen = true
@@ -1697,8 +1709,7 @@ private fun VoicePracticeScreen(
                 words = state.wordQuestions,
                 status = state.loadStatus,
                 dictionaryStatus = state.dictionaryStatus,
-                onChooseCefr = onChooseQuestionCefr,
-                onSaveWords = onSaveWords,
+                onSaveQuestion = onSaveDictionaryQuestion,
                 onImportWords = onImportWords,
             )
         } else if (historyOpen) {
@@ -1771,7 +1782,7 @@ private fun VoicePracticeScreen(
                     Text(
                         text = state.activeQuestions.getOrNull(state.currentIndex)?.prompt
                             ?: if (state.activeQuestions.isNotEmpty()) "Practice complete"
-                            else if (state.isPracticingWords) "Add words in Dictionary / CEFR"
+                            else if (state.isPracticingWords) "Add words in Dictionary"
                             else "Add or import phrases in Settings",
                         modifier = Modifier.padding(top = 12.dp, bottom = 4.dp),
                         color = Ink,
@@ -1996,18 +2007,17 @@ private fun QuestionCefrEditor(
     words: List<Phrase>,
     status: String,
     dictionaryStatus: String,
-    onChooseCefr: (Long, String) -> Unit,
-    onSaveWords: (String) -> Unit,
+    onSaveQuestion: (Long?, String, String, String, Boolean) -> Boolean,
     onImportWords: () -> Unit,
 ) {
     var showWords by remember { mutableStateOf(false) }
-    var wordsEditorOpen by remember { mutableStateOf(false) }
-    var wordsEditorContent by remember(words) { mutableStateOf(WordParser.format(words)) }
+    var questionBeingEdited by remember { mutableStateOf<Phrase?>(null) }
+    var addQuestionOpen by remember { mutableStateOf(false) }
     val questions = if (showWords) words else phrases
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        Text("Dictionary and CEFR", color = Ink, fontSize = 28.sp, fontFamily = FontFamily.Serif)
+        Text("Dictionary", color = Ink, fontSize = 28.sp, fontFamily = FontFamily.Serif)
         Text(
-            "Choose phrase questions or vocabulary words. Adjust CEFR levels, or edit and import the word dictionary.",
+            "Choose phrase questions or vocabulary words. Edit the text and CEFR level in the list.",
             color = Muted,
             fontSize = 13.sp,
             lineHeight = 19.sp,
@@ -2028,32 +2038,29 @@ private fun QuestionCefrEditor(
             }
         }
         if (showWords) {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(onClick = onImportWords) { Text("Import Words.txt") }
-                Button(
-                    onClick = {
-                        wordsEditorContent = WordParser.format(words)
-                        wordsEditorOpen = true
-                    },
-                    colors = ButtonDefaults.buttonColors(containerColor = Green),
-                ) { Text("Edit words") }
-            }
-            if (dictionaryStatus.isNotBlank()) {
-                Text(
-                    dictionaryStatus,
-                    color = if (dictionaryStatus.startsWith("Could not")) Coral else GreenDark,
-                    fontSize = 12.sp,
-                )
-            }
-        } else if (status.isNotBlank()) {
-            Text(status, color = if (status.startsWith("Could not")) Coral else GreenDark, fontSize = 12.sp)
+            OutlinedButton(onClick = onImportWords) { Text("Import Words.txt") }
+        }
+        val visibleStatus = if (showWords) dictionaryStatus else status
+        if (visibleStatus.isNotBlank()) {
+            Text(
+                visibleStatus,
+                color = if (visibleStatus.startsWith("Could not")) Coral else GreenDark,
+                fontSize = 12.sp,
+            )
         }
         Text(
-            "Initial levels are estimates based on phrase or word difficulty. Select a level to change it manually.",
+            "CEFR levels are estimated for new phrases and can be changed manually. New words default to A1. The IS_WORD category is set automatically.",
             color = Muted,
             fontSize = 12.sp,
             lineHeight = 17.sp,
         )
+        Button(
+            onClick = {
+                questionBeingEdited = null
+                addQuestionOpen = true
+            },
+            colors = ButtonDefaults.buttonColors(containerColor = Green),
+        ) { Text("Add") }
         questions.forEach { phrase ->
             Card(
                 colors = CardDefaults.cardColors(containerColor = Color.White),
@@ -2082,37 +2089,98 @@ private fun QuestionCefrEditor(
                     CEFRCefrPicker(
                         selected = phrase.cefr,
                         enabled = phrase.questionId != null,
-                        onSelect = { cefr -> phrase.questionId?.let { onChooseCefr(it, cefr) } },
+                        onSelect = { cefr ->
+                            phrase.questionId?.let {
+                                onSaveQuestion(it, phrase.prompt, phrase.translation, cefr, showWords)
+                            }
+                        },
                     )
+                    TextButton(onClick = {
+                        questionBeingEdited = phrase
+                        addQuestionOpen = true
+                    }) { Text("Edit") }
                 }
             }
         }
-        if (wordsEditorOpen) {
-            AlertDialog(
-                onDismissRequest = { wordsEditorOpen = false },
-                title = { Text("Edit word dictionary") },
-                text = {
-                    OutlinedTextField(
-                        value = wordsEditorContent,
-                        onValueChange = { wordsEditorContent = it },
-                        modifier = Modifier.fillMaxWidth(),
-                        minLines = 10,
-                        maxLines = 16,
-                        placeholder = { Text("дом | house | A1") },
+        if (addQuestionOpen) {
+            DictionaryQuestionDialog(
+                question = questionBeingEdited,
+                isWord = showWords,
+                onDismiss = { addQuestionOpen = false },
+                onSave = { prompt, translation, cefr ->
+                    val saved = onSaveQuestion(
+                        questionBeingEdited?.questionId,
+                        prompt,
+                        translation,
+                        cefr,
+                        showWords,
                     )
-                },
-                confirmButton = {
-                    TextButton(onClick = {
-                        onSaveWords(wordsEditorContent)
-                        wordsEditorOpen = false
-                    }) { Text("Save words") }
-                },
-                dismissButton = {
-                    TextButton(onClick = { wordsEditorOpen = false }) { Text("Cancel") }
+                    if (saved) addQuestionOpen = false
+                    saved
                 },
             )
         }
     }
+}
+
+@Composable
+private fun DictionaryQuestionDialog(
+    question: Phrase?,
+    isWord: Boolean,
+    onDismiss: () -> Unit,
+    onSave: (String, String, String) -> Boolean,
+) {
+    var prompt by remember(question?.questionId, isWord) { mutableStateOf(question?.prompt.orEmpty()) }
+    var translation by remember(question?.questionId, isWord) { mutableStateOf(question?.translation.orEmpty()) }
+    var cefr by remember(question?.questionId, isWord) { mutableStateOf(question?.cefr ?: "A1") }
+    var cefrManuallySelected by remember(question?.questionId, isWord) { mutableStateOf(question != null) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(if (question == null) "Add ${if (isWord) "word" else "phrase"}" else "Edit ${if (isWord) "word" else "phrase"}") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                OutlinedTextField(
+                    value = prompt,
+                    onValueChange = { prompt = it },
+                    label = { Text(if (isWord) "Word" else "Phrase") },
+                    singleLine = true,
+                )
+                OutlinedTextField(
+                    value = translation,
+                    onValueChange = {
+                        translation = it
+                        if (question == null && !isWord && !cefrManuallySelected) {
+                            cefr = CefrEstimator.estimate(it)
+                        }
+                    },
+                    label = { Text("English translation") },
+                    singleLine = true,
+                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("CEFR", color = Muted, modifier = Modifier.padding(end = 8.dp))
+                    CEFRCefrPicker(
+                        selected = cefr,
+                        enabled = true,
+                        onSelect = {
+                            cefr = it
+                            cefrManuallySelected = true
+                        },
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = prompt.isNotBlank() && translation.isNotBlank(),
+                onClick = { onSave(prompt, translation, cefr) },
+            ) {
+                Text(if (question == null) "Add" else "Save")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        },
+    )
 }
 
 @Composable

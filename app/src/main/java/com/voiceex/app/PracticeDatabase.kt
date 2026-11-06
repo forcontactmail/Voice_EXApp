@@ -46,7 +46,7 @@ class PracticeDatabase(context: Context) : SQLiteOpenHelper(
                 TRANSLATION TEXT NOT NULL,
                 ACCEPTED_TRANSLATIONS TEXT NOT NULL,
                 CEFR TEXT NOT NULL CHECK (CEFR IN ('A1', 'A2', 'B1', 'B2', 'C1', 'C2')),
-                WORD BOOLEAN NOT NULL DEFAULT 0 CHECK (WORD IN (0, 1)),
+                IS_WORD BOOLEAN NOT NULL DEFAULT 0 CHECK (IS_WORD IN (0, 1)),
                 ACTIVE INTEGER NOT NULL DEFAULT 1
             )
             """.trimIndent(),
@@ -94,14 +94,17 @@ class PracticeDatabase(context: Context) : SQLiteOpenHelper(
         if (oldVersion < 3) {
             db.execSQL("ALTER TABLE QUESTIONS ADD COLUMN WORD BOOLEAN NOT NULL DEFAULT 0 CHECK (WORD IN (0, 1))")
         }
+        if (oldVersion < 4) {
+            migrateWordColumn(db)
+        }
     }
 
     fun loadActiveQuestions(isWord: Boolean = false): List<Phrase> {
         val questions = mutableListOf<Phrase>()
         readableDatabase.query(
             "QUESTIONS",
-            arrayOf("ID", "QTEXT", "TRANSLATION", "ACCEPTED_TRANSLATIONS", "CEFR", "WORD"),
-            "ACTIVE = 1 AND WORD = ?",
+            arrayOf("ID", "QTEXT", "TRANSLATION", "ACCEPTED_TRANSLATIONS", "CEFR", "IS_WORD"),
+            "ACTIVE = 1 AND IS_WORD = ?",
             arrayOf(if (isWord) "1" else "0"),
             null,
             null,
@@ -127,7 +130,7 @@ class PracticeDatabase(context: Context) : SQLiteOpenHelper(
         db.beginTransaction()
         try {
             val wordValue = if (phrases.firstOrNull()?.isWord == true) 1 else 0
-            db.execSQL("UPDATE QUESTIONS SET ACTIVE = 0 WHERE WORD = ?", arrayOf(wordValue))
+            db.execSQL("UPDATE QUESTIONS SET ACTIVE = 0 WHERE IS_WORD = ?", arrayOf(wordValue))
             for (phrase in phrases) {
                 val existing = findQuestion(db, phrase.prompt, phrase.isWord)
                 val cefr = if (phrase.isWord) phrase.cefr else existing?.cefr ?: phrase.cefr
@@ -136,7 +139,7 @@ class PracticeDatabase(context: Context) : SQLiteOpenHelper(
                     put("TRANSLATION", phrase.translation)
                     put("ACCEPTED_TRANSLATIONS", encodeTranslations(phrase.acceptedTranslations))
                     put("CEFR", cefr)
-                    put("WORD", if (phrase.isWord) 1 else 0)
+                    put("IS_WORD", if (phrase.isWord) 1 else 0)
                     put("ACTIVE", 1)
                 }
                 val question = if (existing == null) {
@@ -155,10 +158,51 @@ class PracticeDatabase(context: Context) : SQLiteOpenHelper(
         return result
     }
 
-    fun updateQuestionCefr(questionId: Long, cefr: String): Boolean {
-        if (cefr !in CefrEstimator.levels) return false
-        val values = ContentValues().apply { put("CEFR", cefr) }
-        return writableDatabase.update("QUESTIONS", values, "ID = ?", arrayOf(questionId.toString())) == 1
+    fun addQuestion(prompt: String, translation: String, cefr: String, isWord: Boolean): Long {
+        require(prompt.isNotBlank()) { "Question text cannot be empty." }
+        require(translation.isNotBlank()) { "Translation cannot be empty." }
+        require(cefr in CefrEstimator.levels) { "Invalid CEFR level." }
+        val values = ContentValues().apply {
+            put("QTEXT", prompt.trim())
+            put("TRANSLATION", translation.trim())
+            put("ACCEPTED_TRANSLATIONS", encodeTranslations(listOf(translation.trim())))
+            put("CEFR", cefr)
+            put("IS_WORD", if (isWord) 1 else 0)
+            put("ACTIVE", 1)
+        }
+        return writableDatabase.insertOrThrow("QUESTIONS", null, values)
+    }
+
+    fun updateQuestion(questionId: Long, prompt: String, translation: String, cefr: String): Boolean {
+        require(prompt.isNotBlank()) { "Question text cannot be empty." }
+        require(translation.isNotBlank()) { "Translation cannot be empty." }
+        require(cefr in CefrEstimator.levels) { "Invalid CEFR level." }
+        val db = writableDatabase
+        val acceptedTranslations = db.query(
+            "QUESTIONS",
+            arrayOf("TRANSLATION", "ACCEPTED_TRANSLATIONS"),
+            "ID = ?",
+            arrayOf(questionId.toString()),
+            null,
+            null,
+            null,
+        ).use { cursor ->
+            if (!cursor.moveToFirst()) return false
+            val previousTranslation = cursor.getString(0)
+            val existingTranslations = decodeTranslations(cursor.getString(1))
+            if (previousTranslation == translation.trim()) {
+                existingTranslations
+            } else {
+                listOf(translation.trim()) + existingTranslations.drop(1)
+            }
+        }
+        val values = ContentValues().apply {
+            put("QTEXT", prompt.trim())
+            put("TRANSLATION", translation.trim())
+            put("ACCEPTED_TRANSLATIONS", encodeTranslations(acceptedTranslations))
+            put("CEFR", cefr)
+        }
+        return db.update("QUESTIONS", values, "ID = ?", arrayOf(questionId.toString())) == 1
     }
 
     fun startSession(startedAt: Long = System.currentTimeMillis()): Long {
@@ -283,7 +327,7 @@ class PracticeDatabase(context: Context) : SQLiteOpenHelper(
         db.query(
             "QUESTIONS",
             arrayOf("ID", "CEFR"),
-            "QTEXT = ? AND WORD = ?",
+            "QTEXT = ? AND IS_WORD = ?",
             arrayOf(text, if (isWord) "1" else "0"),
             null,
             null,
@@ -307,8 +351,61 @@ class PracticeDatabase(context: Context) : SQLiteOpenHelper(
 
     private data class ExistingQuestion(val questionId: Long, val cefr: String)
 
+    private fun migrateWordColumn(db: SQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE QUESTIONS_NEW (
+                ID INTEGER PRIMARY KEY AUTOINCREMENT,
+                QTEXT TEXT NOT NULL,
+                TRANSLATION TEXT NOT NULL,
+                ACCEPTED_TRANSLATIONS TEXT NOT NULL,
+                CEFR TEXT NOT NULL CHECK (CEFR IN ('A1', 'A2', 'B1', 'B2', 'C1', 'C2')),
+                IS_WORD BOOLEAN NOT NULL DEFAULT 0 CHECK (IS_WORD IN (0, 1)),
+                ACTIVE INTEGER NOT NULL DEFAULT 1
+            )
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            INSERT INTO QUESTIONS_NEW (ID, QTEXT, TRANSLATION, ACCEPTED_TRANSLATIONS, CEFR, IS_WORD, ACTIVE)
+            SELECT ID, QTEXT, TRANSLATION, ACCEPTED_TRANSLATIONS, CEFR, WORD, ACTIVE
+            FROM QUESTIONS
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            CREATE TABLE SESSION_QUESTIONS_NEW (
+                ID INTEGER PRIMARY KEY AUTOINCREMENT,
+                SESSION_ID INTEGER NOT NULL REFERENCES SESSIONS(ID) ON DELETE CASCADE,
+                QUESTION_ID INTEGER NOT NULL REFERENCES QUESTIONS_NEW(ID),
+                TIPS_COUNT INTEGER NOT NULL DEFAULT 0,
+                ANSWERED_CORRECTLY INTEGER NOT NULL DEFAULT 0,
+                FIRST_TRY INTEGER NOT NULL DEFAULT 0,
+                SKIPPED INTEGER NOT NULL DEFAULT 0,
+                UNIQUE (SESSION_ID, QUESTION_ID)
+            )
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            INSERT INTO SESSION_QUESTIONS_NEW (
+                ID, SESSION_ID, QUESTION_ID, TIPS_COUNT, ANSWERED_CORRECTLY, FIRST_TRY, SKIPPED
+            )
+            SELECT ID, SESSION_ID, QUESTION_ID, TIPS_COUNT, ANSWERED_CORRECTLY, FIRST_TRY, SKIPPED
+            FROM SESSION_QUESTIONS
+            """.trimIndent(),
+        )
+        db.execSQL("DROP TABLE SESSION_QUESTIONS")
+        db.execSQL("DROP TABLE QUESTIONS")
+        db.execSQL("ALTER TABLE QUESTIONS_NEW RENAME TO QUESTIONS")
+        db.execSQL("ALTER TABLE SESSION_QUESTIONS_NEW RENAME TO SESSION_QUESTIONS")
+        db.execSQL("CREATE INDEX INDEX_SESSION_QUESTIONS_SESSION ON SESSION_QUESTIONS(SESSION_ID)")
+        db.execSQL("CREATE INDEX INDEX_QUESTIONS_ACTIVE ON QUESTIONS(ACTIVE, ID)")
+        db.execSQL("CREATE INDEX INDEX_QUESTIONS_TEXT ON QUESTIONS(QTEXT)")
+    }
+
     companion object {
         private const val DATABASE_NAME = "voice_practice.db"
-        private const val DATABASE_VERSION = 3
+        private const val DATABASE_VERSION = 4
     }
 }
