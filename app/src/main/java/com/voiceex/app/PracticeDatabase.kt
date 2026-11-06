@@ -46,6 +46,7 @@ class PracticeDatabase(context: Context) : SQLiteOpenHelper(
                 TRANSLATION TEXT NOT NULL,
                 ACCEPTED_TRANSLATIONS TEXT NOT NULL,
                 CEFR TEXT NOT NULL CHECK (CEFR IN ('A1', 'A2', 'B1', 'B2', 'C1', 'C2')),
+                WORD BOOLEAN NOT NULL DEFAULT 0 CHECK (WORD IN (0, 1)),
                 ACTIVE INTEGER NOT NULL DEFAULT 1
             )
             """.trimIndent(),
@@ -90,15 +91,18 @@ class PracticeDatabase(context: Context) : SQLiteOpenHelper(
                 db.execSQL("UPDATE SESSION_QUESTIONS SET TIPS_COUNT = TIPS_CONT")
             }
         }
+        if (oldVersion < 3) {
+            db.execSQL("ALTER TABLE QUESTIONS ADD COLUMN WORD BOOLEAN NOT NULL DEFAULT 0 CHECK (WORD IN (0, 1))")
+        }
     }
 
-    fun loadActiveQuestions(): List<Phrase> {
+    fun loadActiveQuestions(isWord: Boolean = false): List<Phrase> {
         val questions = mutableListOf<Phrase>()
         readableDatabase.query(
             "QUESTIONS",
-            arrayOf("ID", "QTEXT", "TRANSLATION", "ACCEPTED_TRANSLATIONS", "CEFR"),
-            "ACTIVE = 1",
-            null,
+            arrayOf("ID", "QTEXT", "TRANSLATION", "ACCEPTED_TRANSLATIONS", "CEFR", "WORD"),
+            "ACTIVE = 1 AND WORD = ?",
+            arrayOf(if (isWord) "1" else "0"),
             null,
             null,
             "ID",
@@ -110,6 +114,7 @@ class PracticeDatabase(context: Context) : SQLiteOpenHelper(
                     acceptedTranslations = decodeTranslations(cursor.getString(3)),
                     questionId = cursor.getLong(0),
                     cefr = cursor.getString(4),
+                    isWord = cursor.getInt(5) != 0,
                 )
             }
         }
@@ -121,22 +126,25 @@ class PracticeDatabase(context: Context) : SQLiteOpenHelper(
         val result = mutableListOf<Phrase>()
         db.beginTransaction()
         try {
-            db.execSQL("UPDATE QUESTIONS SET ACTIVE = 0")
+            val wordValue = if (phrases.firstOrNull()?.isWord == true) 1 else 0
+            db.execSQL("UPDATE QUESTIONS SET ACTIVE = 0 WHERE WORD = ?", arrayOf(wordValue))
             for (phrase in phrases) {
-                val existing = findQuestion(db, phrase.prompt)
+                val existing = findQuestion(db, phrase.prompt, phrase.isWord)
+                val cefr = if (phrase.isWord) phrase.cefr else existing?.cefr ?: phrase.cefr
                 val values = ContentValues().apply {
                     put("QTEXT", phrase.prompt)
                     put("TRANSLATION", phrase.translation)
                     put("ACCEPTED_TRANSLATIONS", encodeTranslations(phrase.acceptedTranslations))
+                    put("CEFR", cefr)
+                    put("WORD", if (phrase.isWord) 1 else 0)
                     put("ACTIVE", 1)
                 }
                 val question = if (existing == null) {
-                    values.put("CEFR", CefrEstimator.estimate(phrase.translation))
                     val id = db.insertOrThrow("QUESTIONS", null, values)
-                    phrase.copy(questionId = id, cefr = CefrEstimator.estimate(phrase.translation))
+                    phrase.copy(questionId = id, cefr = cefr)
                 } else {
                     db.update("QUESTIONS", values, "ID = ?", arrayOf(existing.questionId.toString()))
-                    phrase.copy(questionId = existing.questionId, cefr = existing.cefr)
+                    phrase.copy(questionId = existing.questionId, cefr = cefr)
                 }
                 result += question
             }
@@ -271,12 +279,12 @@ class PracticeDatabase(context: Context) : SQLiteOpenHelper(
         return details
     }
 
-    private fun findQuestion(db: SQLiteDatabase, text: String): ExistingQuestion? =
+    private fun findQuestion(db: SQLiteDatabase, text: String, isWord: Boolean): ExistingQuestion? =
         db.query(
             "QUESTIONS",
             arrayOf("ID", "CEFR"),
-            "QTEXT = ?",
-            arrayOf(text),
+            "QTEXT = ? AND WORD = ?",
+            arrayOf(text, if (isWord) "1" else "0"),
             null,
             null,
             "ID",
@@ -301,6 +309,6 @@ class PracticeDatabase(context: Context) : SQLiteOpenHelper(
 
     companion object {
         private const val DATABASE_NAME = "voice_practice.db"
-        private const val DATABASE_VERSION = 2
+        private const val DATABASE_VERSION = 3
     }
 }

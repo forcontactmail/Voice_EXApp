@@ -9,6 +9,7 @@ data class Phrase(
     val acceptedTranslations: List<String> = listOf(translation),
     val questionId: Long? = null,
     val cefr: String = CefrEstimator.estimate(translation),
+    val isWord: Boolean = false,
 ) {
     fun acceptsTranslation(answer: String): Boolean {
         val normalizedAnswer = normalizeAnswer(answer)
@@ -69,6 +70,32 @@ object PhraseParser {
 
     fun format(phrases: List<Phrase>): String = phrases.joinToString("\n") { phrase ->
         (listOf(phrase.prompt) + phrase.acceptedTranslations).joinToString(" | ")
+    }
+}
+
+object WordParser {
+    fun parse(content: String): List<Phrase> =
+        content.removePrefix("\uFEFF").lines().mapIndexedNotNull { index, line ->
+            if (line.isBlank()) return@mapIndexedNotNull null
+            val delimiter = if ('\t' in line) '\t' else '|'
+            val fields = line.split(delimiter).map(String::trim)
+            if (fields.size != 3 || fields.any(String::isEmpty)) {
+                throw IllegalArgumentException("Line ${index + 1} must contain a Russian word, translation, and CEFR level")
+            }
+            val cefr = fields[2].uppercase(Locale.US)
+            if (cefr !in CefrEstimator.levels) {
+                throw IllegalArgumentException("Line ${index + 1} has an invalid CEFR level")
+            }
+            Phrase(
+                prompt = fields[0],
+                translation = fields[1],
+                cefr = cefr,
+                isWord = true,
+            )
+        }
+
+    fun format(words: List<Phrase>): String = words.joinToString("\n") { word ->
+        "${word.prompt} | ${word.translation} | ${word.cefr}"
     }
 }
 

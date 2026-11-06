@@ -37,6 +37,31 @@ class PhraseTest {
     }
 
     @Test
+    fun parsesWordDictionaryWithCefrLevels() {
+        val words = WordParser.parse(
+            "дом | house | A1\n" +
+                "окружающая среда | environment | B1\n" +
+                "слово\tword\tA1",
+        )
+
+        assertEquals(3, words.size)
+        assertEquals("house", words[0].translation)
+        assertEquals("A1", words[0].cefr)
+        assertTrue(words.all { it.isWord })
+        assertEquals(
+            "дом | house | A1\nокружающая среда | environment | B1\nслово | word | A1",
+            WordParser.format(words),
+        )
+        assertFalse(PhraseParser.parse("Доброе утро | Good morning").single().isWord)
+    }
+
+    @Test
+    fun rejectsInvalidWordDictionaryRows() {
+        assertTrue(runCatching { WordParser.parse("дом | house") }.isFailure)
+        assertTrue(runCatching { WordParser.parse("дом | house | C7") }.isFailure)
+    }
+
+    @Test
     fun reportsInvalidLinesAndMissingSides() {
         val missingSeparator = runCatching { PhraseParser.parse("Привет") }.exceptionOrNull()
         val missingTranslation = runCatching { PhraseParser.parse("Привет | ") }.exceptionOrNull()
