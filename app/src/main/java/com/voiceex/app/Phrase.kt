@@ -17,6 +17,19 @@ data class Phrase(
     }
 }
 
+fun questionsForSelectedAssets(
+    phrases: List<Phrase>,
+    words: List<Phrase>,
+    selectedAssetPaths: Set<String>,
+): List<Phrase> = buildList {
+    if (selectedAssetPaths.any { it.substringAfterLast('/').equals("phrases.txt", ignoreCase = true) }) {
+        addAll(phrases)
+    }
+    if (selectedAssetPaths.any { it.substringAfterLast('/').equals("Words.txt", ignoreCase = true) }) {
+        addAll(words)
+    }
+}
+
 class FirstTryRating private constructor(
     val attemptedPhraseIndexes: Set<Int>,
     val correctFirstTryPhraseIndexes: Set<Int>,

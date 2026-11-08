@@ -56,6 +56,22 @@ class PhraseTest {
     }
 
     @Test
+    fun includesOnlyQuestionsFromSelectedAssets() {
+        val phrases = listOf(Phrase("phrase", "translation"))
+        val words = listOf(Phrase("word", "translation", isWord = true))
+
+        assertEquals(
+            listOf(words.single()),
+            questionsForSelectedAssets(phrases, words, setOf("vocabulary/Words.txt")),
+        )
+        assertEquals(
+            listOf(phrases.single()),
+            questionsForSelectedAssets(phrases, words, setOf("phrases.txt")),
+        )
+        assertTrue(questionsForSelectedAssets(phrases, words, emptySet()).isEmpty())
+    }
+
+    @Test
     fun rejectsInvalidWordDictionaryRows() {
         assertTrue(runCatching { WordParser.parse("дом | house") }.isFailure)
         assertTrue(runCatching { WordParser.parse("дом | house | C7") }.isFailure)

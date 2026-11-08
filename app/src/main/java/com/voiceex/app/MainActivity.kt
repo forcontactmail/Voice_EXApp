@@ -140,7 +140,11 @@ private data class PracticeUiState(
     val assetHierarchy: List<HierarchyNode> = emptyList(),
 ) {
     val activeQuestions: List<Phrase>
-        get() = if (isPracticingWords) wordQuestions else phrases
+        get() = questionsForSelectedAssets(
+            phrases = phrases,
+            words = wordQuestions,
+            selectedAssetPaths = selectedAssetPaths(assetHierarchy),
+        )
 }
 
 class MainActivity : androidx.activity.ComponentActivity() {
@@ -200,6 +204,9 @@ class MainActivity : androidx.activity.ComponentActivity() {
                 Surface(modifier = Modifier.fillMaxSize(), color = Paper) {
                     VoicePracticeScreen(
                         state = uiState,
+                        onHierarchyChanged = { nodes ->
+                            updateState { copy(assetHierarchy = nodes) }
+                        },
                         onStartPractice = {
                             when {
                                 uiState.isPaused -> resumePractice()
@@ -727,13 +734,13 @@ class MainActivity : androidx.activity.ComponentActivity() {
 
     private fun requestMicrophoneAndStart() {
         val selectedAssetPaths = selectedAssetPaths(uiState.assetHierarchy)
-        if (selectedAssetPaths.isEmpty() && uiState.activeQuestions.isNotEmpty()) {
+        if (selectedAssetPaths.isEmpty()) {
             updateState { copy(recognitionStatus = "No asset nodes are selected for testing.") }
             return
         }
         val questions = uiState.activeQuestions
         if (questions.isEmpty()) {
-            updateState { copy(recognitionStatus = "The practice list is empty.") }
+            updateState { copy(recognitionStatus = "The selected assets contain no practice questions.") }
             return
         }
         offlineRecognitionBlockReason(uiState.selectedRecognitionLanguage)?.let { reason ->
@@ -1556,6 +1563,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
 @Composable
 private fun VoicePracticeScreen(
     state: PracticeUiState,
+    onHierarchyChanged: (List<HierarchyNode>) -> Unit,
     onStartPractice: () -> Unit,
     onPausePractice: () -> Unit,
     onImport: () -> Unit,
@@ -1805,6 +1813,7 @@ private fun VoicePracticeScreen(
                 status = state.loadStatus,
                 dictionaryStatus = state.dictionaryStatus,
                 assetHierarchy = state.assetHierarchy,
+                onHierarchyChanged = onHierarchyChanged,
                 onSaveQuestion = onSaveDictionaryQuestion,
                 onImportWords = onImportWords,
             )
@@ -1846,7 +1855,7 @@ private fun VoicePracticeScreen(
                             verticalArrangement = Arrangement.spacedBy(4.dp),
                         ) {
                             Text(
-                                if (state.isPracticingWords) "WORDS" else "PHRASES",
+                                "SELECTED QUESTIONS",
                                 color = Muted,
                                 fontSize = 10.sp,
                                 fontWeight = FontWeight.Bold,
@@ -1878,8 +1887,7 @@ private fun VoicePracticeScreen(
                     Text(
                         text = state.activeQuestions.getOrNull(state.currentIndex)?.prompt
                             ?: if (state.activeQuestions.isNotEmpty()) "Practice complete"
-                            else if (state.isPracticingWords) "Add words in Dictionary"
-                            else "Add or import phrases in Settings",
+                            else "Select questions in Dictionary",
                         modifier = Modifier.padding(top = 12.dp, bottom = 4.dp),
                         color = Ink,
                         fontSize = 26.sp,
@@ -1920,7 +1928,7 @@ private fun VoicePracticeScreen(
                     ) {
                         Button(
                             onClick = onStartPractice,
-                            enabled = state.phrases.isNotEmpty() || state.wordQuestions.isNotEmpty(),
+                            enabled = state.activeQuestions.isNotEmpty(),
                             modifier = Modifier.weight(1f).height(50.dp),
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = if (state.isActive || state.isPaused) GreenDark else Green,
@@ -2234,6 +2242,7 @@ private fun QuestionCefrEditor(
     status: String,
     dictionaryStatus: String,
     assetHierarchy: List<HierarchyNode>,
+    onHierarchyChanged: (List<HierarchyNode>) -> Unit,
     onSaveQuestion: (Long?, String, String, String, Boolean) -> Boolean,
     onImportWords: () -> Unit,
 ) {
@@ -2284,7 +2293,7 @@ private fun QuestionCefrEditor(
         Text("Asset hierarchy", color = Ink, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
         HierarchyTreePicker(
             nodes = assetHierarchy,
-            onNodesChanged = { /* selection state is tracked in-memory for the current tree */ },
+            onNodesChanged = onHierarchyChanged,
         )
         Button(
             onClick = {
