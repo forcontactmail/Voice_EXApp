@@ -5,6 +5,7 @@ import android.app.Activity
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.res.AssetManager
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.database.sqlite.SQLiteException
@@ -44,6 +45,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.LinearProgressIndicator
@@ -84,6 +86,8 @@ private val GreenDark = Color(0xFF105B49)
 private val Coral = Color(0xFFC85C47)
 private val Line = Color(0xFFDCE3DC)
 private const val DEFAULT_RECOGNITION_LANGUAGE = "en-US"
+private const val RECOGNITION_POSSIBLY_COMPLETE_SILENCE_MILLIS = 2_000
+private const val RECOGNITION_COMPLETE_SILENCE_MILLIS = 3_000
 private const val MAX_ANSWER_CHECK_DELAY_HALF_SECONDS = 10
 private const val ANSWER_CHECK_DELAY_STEP_MILLIS = 500L
 private const val DEFAULT_ANSWER_CHECK_DELAY_HALF_SECONDS = 0
@@ -108,7 +112,8 @@ private data class PracticeUiState(
     val isPracticingWords: Boolean = false,
     val currentIndex: Int = 0,
     val isActive: Boolean = false,
-    val feedback: String = "Choose Start Phrases or Start Words to begin.",
+    val isPaused: Boolean = false,
+    val feedback: String = "Choose Start to begin.",
     val recognitionStatus: String = "",
     val loadStatus: String = "Loading sample...",
     val firstTryRating: FirstTryRating = FirstTryRating(),
@@ -132,6 +137,7 @@ private data class PracticeUiState(
     val historyDetailTitle: String = "",
     val historyStatus: String = "",
     val dictionaryStatus: String = "",
+    val assetHierarchy: List<HierarchyNode> = emptyList(),
 ) {
     val activeQuestions: List<Phrase>
         get() = if (isPracticingWords) wordQuestions else phrases
@@ -180,6 +186,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
         loadSavedOfflineRecognition()
         loadSavedPhrases()
         loadSavedWords()
+        updateState { copy(assetHierarchy = buildAssetHierarchyTree(assets)) }
         setContent {
             MaterialTheme(colorScheme = lightColorScheme(
                 primary = Green,
@@ -193,9 +200,19 @@ class MainActivity : androidx.activity.ComponentActivity() {
                 Surface(modifier = Modifier.fillMaxSize(), color = Paper) {
                     VoicePracticeScreen(
                         state = uiState,
-                        onStartPhrases = { requestMicrophoneAndStart(isWords = false) },
-                        onStartWords = { requestMicrophoneAndStart(isWords = true) },
-                        onStop = ::stopPractice,
+                        onStartPractice = {
+                            when {
+                                uiState.isPaused -> resumePractice()
+                                uiState.isActive -> resetPractice()
+                                else -> requestMicrophoneAndStart()
+                            }
+                        },
+                        onPausePractice = {
+                            when {
+                                uiState.isPaused -> resumePractice()
+                                uiState.isActive -> pausePractice()
+                            }
+                        },
                         onImport = ::importPhrases,
                         onSavePhrases = ::savePhrases,
                         onChooseRussianVoice = { saveVoice(it, true) },
@@ -558,14 +575,37 @@ class MainActivity : androidx.activity.ComponentActivity() {
         }
     }
 
+    private fun readAssetTreeTexts(baseDir: String = ""): List<String> {
+        val files = mutableListOf<String>()
+        val entries = assets.list(baseDir).orEmpty()
+        entries.forEach { entry ->
+            val path = if (baseDir.isEmpty()) entry else "$baseDir/$entry"
+            val nestedEntries = assets.list(path).orEmpty()
+            if (nestedEntries.isNotEmpty()) {
+                files += readAssetTreeTexts(path)
+            } else if (entry.endsWith(".txt", ignoreCase = true) || entry.endsWith(".csv", ignoreCase = true)) {
+                files += path
+            }
+        }
+        return files
+    }
+
     private fun loadSavedPhrases() {
         val saved = getPreferences(MODE_PRIVATE).getString(PHRASES_KEY, null)
         runCatching {
             var phrases = practiceDatabase.loadActiveQuestions()
             val loadedFromDatabase = phrases.isNotEmpty()
             if (!loadedFromDatabase) {
-                val content = saved ?: assets.open("phrases.txt")
-                    .bufferedReader(Charsets.UTF_8).use { it.readText() }
+                val content = saved ?: run {
+                    val fallbackFiles = readAssetTreeTexts()
+                    val assetText = fallbackFiles.firstNotNullOfOrNull { file ->
+                        runCatching {
+                            assets.open(file).bufferedReader(Charsets.UTF_8).use { it.readText() }
+                        }.getOrNull()
+                    }
+                    assetText ?: assets.open("phrases.txt")
+                        .bufferedReader(Charsets.UTF_8).use { it.readText() }
+                }
                 phrases = practiceDatabase.replaceActiveQuestions(PhraseParser.parse(content))
             }
             if (phrases.isEmpty()) {
@@ -599,7 +639,12 @@ class MainActivity : androidx.activity.ComponentActivity() {
         runCatching {
             var words = practiceDatabase.loadActiveQuestions(isWord = true)
             if (words.isEmpty()) {
-                val content = assets.open("Words.txt").bufferedReader(Charsets.UTF_8).use { it.readText() }
+                val content = run {
+                    val fallbackFile = readAssetTreeTexts().firstOrNull { it.contains("word", ignoreCase = true) }
+                    fallbackFile?.let { file ->
+                        assets.open(file).bufferedReader(Charsets.UTF_8).use { it.readText() }
+                    } ?: assets.open("Words.txt").bufferedReader(Charsets.UTF_8).use { it.readText() }
+                }
                 words = practiceDatabase.replaceActiveQuestions(WordParser.parse(content))
             }
             updateState {
@@ -680,33 +725,32 @@ class MainActivity : androidx.activity.ComponentActivity() {
         }
     }
 
-    private fun requestMicrophoneAndStart(isWords: Boolean) {
-        val questions = if (isWords) uiState.wordQuestions else uiState.phrases
+    private fun requestMicrophoneAndStart() {
+        val selectedAssetPaths = selectedAssetPaths(uiState.assetHierarchy)
+        if (selectedAssetPaths.isEmpty() && uiState.activeQuestions.isNotEmpty()) {
+            updateState { copy(recognitionStatus = "No asset nodes are selected for testing.") }
+            return
+        }
+        val questions = uiState.activeQuestions
         if (questions.isEmpty()) {
-            updateState {
-                copy(recognitionStatus = if (isWords) "The word dictionary is empty." else "The phrase list is empty.")
-            }
-            if (uiState.isActive) listenAgain()
+            updateState { copy(recognitionStatus = "The practice list is empty.") }
             return
         }
         offlineRecognitionBlockReason(uiState.selectedRecognitionLanguage)?.let { reason ->
             updateState { copy(recognitionStatus = reason) }
-            if (uiState.isActive) listenAgain()
             return
         }
         if (!ensureSpeechRecognizer()) return
-        if (uiState.isActive) {
-            cancelRecognition()
-            cancelSpeech()
-            finishHistorySession()
+        if (uiState.isActive || uiState.isPaused) {
+            resetPractice()
+            return
         }
         updateState {
             copy(
-                isPracticingWords = isWords,
                 currentIndex = 0,
                 isActive = false,
-                firstTryRating = if (isPracticingWords == isWords) firstTryRating else FirstTryRating(),
-                feedback = if (isWords) "Starting word practice." else "Starting phrase practice.",
+                isPaused = false,
+                feedback = "Starting practice.",
                 recognitionStatus = "",
                 reveal = null,
             )
@@ -716,6 +760,51 @@ class MainActivity : androidx.activity.ComponentActivity() {
         } else {
             microphonePermission.launch(Manifest.permission.RECORD_AUDIO)
         }
+    }
+
+    private fun pausePractice() {
+        if (!uiState.isActive) return
+        updateState {
+            copy(
+                isActive = false,
+                isPaused = true,
+                recognitionStatus = "Practice paused.",
+                feedback = "Practice paused. Tap Resumption to continue.",
+            )
+        }
+        cancelRecognition()
+        cancelSpeech()
+    }
+
+    private fun resumePractice() {
+        if (!uiState.isPaused) return
+        updateState {
+            copy(
+                isActive = true,
+                isPaused = false,
+                recognitionStatus = "Listen to the source phrase...",
+                feedback = "Say the English translation.",
+            )
+        }
+        beginPrompt()
+    }
+
+    private fun resetPractice() {
+        updateState {
+            copy(
+                currentIndex = 0,
+                isActive = false,
+                isPaused = false,
+                firstTryRating = FirstTryRating(),
+                reveal = null,
+                feedback = "Choose Start to begin.",
+                recognitionStatus = "Practice reset.",
+            )
+        }
+        cancelRecognition()
+        cancelSpeech()
+        stopPracticeService()
+        finishHistorySession()
     }
 
     private fun beginPrompt() {
@@ -752,8 +841,9 @@ class MainActivity : androidx.activity.ComponentActivity() {
         updateState {
             copy(
                 isActive = true,
+                isPaused = false,
                 reveal = null,
-                feedback = "Say the English translation. Voice commands: “Start Phrases”, “Start Words”, “Repeat question”, “Skip question”, “Previous question”, “First question”, “Rating”, or “Clear rating”.",
+                feedback = "Say the English translation. Repeat question, skip question, previous question, first question, rating, or clear rating are available.",
                 recognitionStatus = "Listen to the source phrase...",
             )
         }
@@ -776,6 +866,14 @@ class MainActivity : androidx.activity.ComponentActivity() {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, language)
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 5)
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
+            putExtra(
+                RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS,
+                RECOGNITION_POSSIBLY_COMPLETE_SILENCE_MILLIS,
+            )
+            putExtra(
+                RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS,
+                RECOGNITION_COMPLETE_SILENCE_MILLIS,
+            )
         }
         try {
             val attemptId = ++recognitionAttemptId
@@ -917,12 +1015,8 @@ class MainActivity : androidx.activity.ComponentActivity() {
             retryAfterUnrecognizedSpeech()
             return
         }
-        if (alternatives.any(::isStartPhrasesCommand)) {
-            requestMicrophoneAndStart(isWords = false)
-            return
-        }
-        if (alternatives.any(::isStartWordsCommand)) {
-            requestMicrophoneAndStart(isWords = true)
+        if (alternatives.any(::isStartPhrasesCommand) || alternatives.any(::isStartWordsCommand)) {
+            requestMicrophoneAndStart()
             return
         }
         if (alternatives.any(::isRepeatCommand)) {
@@ -1182,7 +1276,9 @@ class MainActivity : androidx.activity.ComponentActivity() {
         updateState {
             copy(
                 isActive = false,
+                isPaused = false,
                 recognitionStatus = "Practice stopped.",
+                feedback = "Choose Start to begin.",
             )
         }
         cancelRecognition()
@@ -1237,7 +1333,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
                                 currentIndex = 0,
                                 firstTryRating = FirstTryRating(),
                                 reveal = null,
-                                feedback = "Choose Start Phrases or Start Words to begin.",
+                                feedback = "Choose Start to begin.",
                                 loadStatus = "File loaded. Phrases: ${phrases.size}. Tap Save List to use it next time.",
                             )
                         }
@@ -1274,7 +1370,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
                         firstTryRating = FirstTryRating(),
                         reveal = null,
                         loadStatus = "Questions saved to the database. Phrases: ${savedQuestions.size}.",
-                        feedback = "Choose Start Phrases or Start Words to begin.",
+                        feedback = "Choose Start to begin.",
                     )
                 }
             }
@@ -1460,9 +1556,8 @@ class MainActivity : androidx.activity.ComponentActivity() {
 @Composable
 private fun VoicePracticeScreen(
     state: PracticeUiState,
-    onStartPhrases: () -> Unit,
-    onStartWords: () -> Unit,
-    onStop: () -> Unit,
+    onStartPractice: () -> Unit,
+    onPausePractice: () -> Unit,
     onImport: () -> Unit,
     onSavePhrases: (String) -> Unit,
     onChooseRussianVoice: (String) -> Unit,
@@ -1709,6 +1804,7 @@ private fun VoicePracticeScreen(
                 words = state.wordQuestions,
                 status = state.loadStatus,
                 dictionaryStatus = state.dictionaryStatus,
+                assetHierarchy = state.assetHierarchy,
                 onSaveQuestion = onSaveDictionaryQuestion,
                 onImportWords = onImportWords,
             )
@@ -1818,38 +1914,38 @@ private fun VoicePracticeScreen(
                     if (state.recognitionStatus.isNotBlank()) {
                         Text(state.recognitionStatus, color = Muted, fontSize = 12.sp, lineHeight = 17.sp)
                     }
-                    if (state.isActive) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
                         Button(
-                            onClick = onStop,
-                            modifier = Modifier.fillMaxWidth().height(50.dp),
-                            colors = ButtonDefaults.buttonColors(containerColor = Coral),
+                            onClick = onStartPractice,
+                            enabled = state.phrases.isNotEmpty() || state.wordQuestions.isNotEmpty(),
+                            modifier = Modifier.weight(1f).height(50.dp),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (state.isActive || state.isPaused) GreenDark else Green,
+                            ),
                             shape = RoundedCornerShape(12.dp),
                         ) {
-                            Text("Stop", fontWeight = FontWeight.SemiBold)
+                            Text(
+                                if (state.isActive || state.isPaused) "Reset" else "Start",
+                                fontWeight = FontWeight.SemiBold,
+                            )
                         }
-                    } else {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        Button(
+                            onClick = onPausePractice,
+                            enabled = state.isActive || state.isPaused,
+                            modifier = Modifier.weight(1f).height(50.dp),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (state.isActive || state.isPaused) Green else Color(0xFFE7E9E5),
+                                contentColor = if (state.isActive || state.isPaused) Color.White else Muted,
+                            ),
+                            shape = RoundedCornerShape(12.dp),
                         ) {
-                            Button(
-                                onClick = onStartPhrases,
-                                enabled = state.phrases.isNotEmpty(),
-                                modifier = Modifier.weight(1f).height(50.dp),
-                                colors = ButtonDefaults.buttonColors(containerColor = Green),
-                                shape = RoundedCornerShape(12.dp),
-                            ) {
-                                Text("Start Phrases", fontWeight = FontWeight.SemiBold)
-                            }
-                            Button(
-                                onClick = onStartWords,
-                                enabled = state.wordQuestions.isNotEmpty(),
-                                modifier = Modifier.weight(1f).height(50.dp),
-                                colors = ButtonDefaults.buttonColors(containerColor = Green),
-                                shape = RoundedCornerShape(12.dp),
-                            ) {
-                                Text("Start Words", fontWeight = FontWeight.SemiBold)
-                            }
+                            Text(
+                                if (state.isPaused) "Resumption" else "Pause",
+                                fontWeight = FontWeight.SemiBold,
+                            )
                         }
                     }
                 }
@@ -2001,12 +2097,143 @@ private fun HistoryQuestionDetails(
     }
 }
 
+private fun buildAssetHierarchyTree(assetManager: AssetManager, baseDir: String = ""): List<HierarchyNode> {
+    val roots = mutableListOf<HierarchyNode>()
+    val entries = runCatching { assetManager.list(baseDir) ?: emptyArray<String>() }.getOrDefault(emptyArray())
+    entries.sorted().forEach { name ->
+        val path = if (baseDir.isEmpty()) name else "$baseDir/$name"
+        val nested = runCatching { assetManager.list(path) ?: emptyArray<String>() }.getOrDefault(emptyArray())
+        val node = if (nested.isNotEmpty()) {
+            HierarchyNode(
+                name = name,
+                isFile = false,
+                children = buildAssetHierarchyTree(assetManager, path).toMutableList(),
+            )
+        } else if (name.endsWith(".txt", ignoreCase = true) || name.endsWith(".csv", ignoreCase = true)) {
+            HierarchyNode(name = name, isFile = true)
+        } else null
+        if (node != null) {
+            node.children.forEach { child -> child.parent = node }
+            node.selected = true
+            roots += node
+        }
+    }
+    return roots
+}
+
+private fun selectedAssetPaths(nodes: List<HierarchyNode>, prefix: String = ""): Set<String> {
+    val selected = mutableSetOf<String>()
+    nodes.forEach { node ->
+        val current = if (prefix.isEmpty()) node.name else "$prefix/${node.name}"
+        when {
+            node.isFile && (node.selected || node.indeterminate) -> selected += current
+            !node.isFile && node.selected -> selected += collectSubtreePaths(node, current)
+            !node.isFile && node.indeterminate -> selected += selectedAssetPaths(node.children, current)
+        }
+    }
+    return selected
+}
+
+private fun collectSubtreePaths(node: HierarchyNode, prefix: String): Set<String> {
+    val paths = mutableSetOf<String>()
+    if (node.isFile) {
+        paths += prefix
+        return paths
+    }
+    node.children.forEach { child ->
+        val childPath = "$prefix/${child.name}"
+        if (child.isFile) paths += childPath else paths += collectSubtreePaths(child, childPath)
+    }
+    return paths
+}
+
+private fun toggleHierarchyNode(node: HierarchyNode) {
+    val nextSelected = !(node.selected || node.indeterminate)
+    fun applyChildren(current: HierarchyNode) {
+        current.children.forEach { child ->
+            child.selected = nextSelected
+            child.indeterminate = false
+            applyChildren(child)
+        }
+    }
+    node.selected = nextSelected
+    node.indeterminate = false
+    applyChildren(node)
+    var parent = node.parent
+    while (parent != null) {
+        val children = parent.children
+        val checkedCount = children.count { it.selected }
+        val indeterminateCount = children.count { it.indeterminate }
+        parent.selected = checkedCount == children.size && children.isNotEmpty()
+        parent.indeterminate = (checkedCount in 1 until children.size) || indeterminateCount > 0
+        if (parent.selected) parent.indeterminate = false
+        parent = parent.parent
+    }
+}
+
+private fun recalculateHierarchyNodeState(node: HierarchyNode) {
+    if (node.children.isEmpty()) return
+    val checkedCount = node.children.count { it.selected }
+    val indeterminateCount = node.children.count { it.indeterminate }
+    node.selected = checkedCount == node.children.size && node.children.isNotEmpty()
+    node.indeterminate = (checkedCount in 1 until node.children.size) || indeterminateCount > 0
+    if (node.selected) node.indeterminate = false
+}
+
+@Composable
+private fun HierarchyTreePicker(
+    nodes: List<HierarchyNode>,
+    onNodesChanged: (List<HierarchyNode>) -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        nodes.forEach { node ->
+            HierarchyNodeRow(node = node, depth = 0, onChange = { changedNode ->
+                toggleHierarchyNode(changedNode)
+                onNodesChanged(nodes)
+            })
+        }
+    }
+}
+
+@Composable
+private fun HierarchyNodeRow(
+    node: HierarchyNode,
+    depth: Int,
+    onChange: (HierarchyNode) -> Unit,
+) {
+    Column {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Spacer(Modifier.width((depth * 16).dp))
+            Checkbox(
+                checked = node.selected || node.indeterminate,
+                onCheckedChange = { onChange(node) },
+                enabled = true,
+            )
+            Text(
+                node.name,
+                color = if (node.indeterminate) Coral else Ink,
+                fontSize = 12.sp,
+                modifier = Modifier.weight(1f),
+            )
+        }
+        if (node.children.isNotEmpty()) {
+            node.children.forEach { child ->
+                HierarchyNodeRow(child, depth + 1, onChange)
+            }
+        }
+    }
+}
+
 @Composable
 private fun QuestionCefrEditor(
     phrases: List<Phrase>,
     words: List<Phrase>,
     status: String,
     dictionaryStatus: String,
+    assetHierarchy: List<HierarchyNode>,
     onSaveQuestion: (Long?, String, String, String, Boolean) -> Boolean,
     onImportWords: () -> Unit,
 ) {
@@ -2053,6 +2280,11 @@ private fun QuestionCefrEditor(
             color = Muted,
             fontSize = 12.sp,
             lineHeight = 17.sp,
+        )
+        Text("Asset hierarchy", color = Ink, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+        HierarchyTreePicker(
+            nodes = assetHierarchy,
+            onNodesChanged = { /* selection state is tracked in-memory for the current tree */ },
         )
         Button(
             onClick = {

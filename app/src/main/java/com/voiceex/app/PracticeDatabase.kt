@@ -27,6 +27,17 @@ data class SessionQuestionDetail(
     val tipsCount: Int,
 )
 
+data class HierarchyNode(
+    val id: Long? = null,
+    val parentId: Long? = null,
+    val name: String,
+    val isFile: Boolean = false,
+    val children: MutableList<HierarchyNode> = mutableListOf(),
+    var selected: Boolean = false,
+    var indeterminate: Boolean = false,
+    var parent: HierarchyNode? = null,
+)
+
 class PracticeDatabase(context: Context) : SQLiteOpenHelper(
     context,
     DATABASE_NAME,
@@ -40,6 +51,15 @@ class PracticeDatabase(context: Context) : SQLiteOpenHelper(
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL(
             """
+            CREATE TABLE HIERARHY (
+                ID INTEGER PRIMARY KEY AUTOINCREMENT,
+                PARENT_ID INTEGER REFERENCES HIERARHY(ID) ON DELETE CASCADE,
+                NAME TEXT NOT NULL
+            )
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
             CREATE TABLE QUESTIONS (
                 ID INTEGER PRIMARY KEY AUTOINCREMENT,
                 QTEXT TEXT NOT NULL,
@@ -47,6 +67,7 @@ class PracticeDatabase(context: Context) : SQLiteOpenHelper(
                 ACCEPTED_TRANSLATIONS TEXT NOT NULL,
                 CEFR TEXT NOT NULL CHECK (CEFR IN ('A1', 'A2', 'B1', 'B2', 'C1', 'C2')),
                 IS_WORD BOOLEAN NOT NULL DEFAULT 0 CHECK (IS_WORD IN (0, 1)),
+                HIERARHY_ID INTEGER REFERENCES HIERARHY(ID),
                 ACTIVE INTEGER NOT NULL DEFAULT 1
             )
             """.trimIndent(),
@@ -96,6 +117,26 @@ class PracticeDatabase(context: Context) : SQLiteOpenHelper(
         }
         if (oldVersion < 4) {
             migrateWordColumn(db)
+        }
+        if (oldVersion < 5) {
+            db.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS HIERARHY (
+                    ID INTEGER PRIMARY KEY AUTOINCREMENT,
+                    PARENT_ID INTEGER REFERENCES HIERARHY(ID) ON DELETE CASCADE,
+                    NAME TEXT NOT NULL
+                )
+                """.trimIndent(),
+            )
+            val hasHierarchyId = db.rawQuery("PRAGMA table_info(QUESTIONS)", null).use { cursor ->
+                while (cursor.moveToNext()) {
+                    if (cursor.getString(cursor.getColumnIndexOrThrow("name")) == "HIERARHY_ID") return@use true
+                }
+                false
+            }
+            if (!hasHierarchyId) {
+                db.execSQL("ALTER TABLE QUESTIONS ADD COLUMN HIERARHY_ID INTEGER REFERENCES HIERARHY(ID)")
+            }
         }
     }
 
@@ -158,7 +199,7 @@ class PracticeDatabase(context: Context) : SQLiteOpenHelper(
         return result
     }
 
-    fun addQuestion(prompt: String, translation: String, cefr: String, isWord: Boolean): Long {
+    fun addQuestion(prompt: String, translation: String, cefr: String, isWord: Boolean, hierarchyId: Long? = null): Long {
         require(prompt.isNotBlank()) { "Question text cannot be empty." }
         require(translation.isNotBlank()) { "Translation cannot be empty." }
         require(cefr in CefrEstimator.levels) { "Invalid CEFR level." }
@@ -168,12 +209,13 @@ class PracticeDatabase(context: Context) : SQLiteOpenHelper(
             put("ACCEPTED_TRANSLATIONS", encodeTranslations(listOf(translation.trim())))
             put("CEFR", cefr)
             put("IS_WORD", if (isWord) 1 else 0)
+            put("HIERARHY_ID", hierarchyId)
             put("ACTIVE", 1)
         }
         return writableDatabase.insertOrThrow("QUESTIONS", null, values)
     }
 
-    fun updateQuestion(questionId: Long, prompt: String, translation: String, cefr: String): Boolean {
+    fun updateQuestion(questionId: Long, prompt: String, translation: String, cefr: String, hierarchyId: Long? = null): Boolean {
         require(prompt.isNotBlank()) { "Question text cannot be empty." }
         require(translation.isNotBlank()) { "Translation cannot be empty." }
         require(cefr in CefrEstimator.levels) { "Invalid CEFR level." }
@@ -201,8 +243,60 @@ class PracticeDatabase(context: Context) : SQLiteOpenHelper(
             put("TRANSLATION", translation.trim())
             put("ACCEPTED_TRANSLATIONS", encodeTranslations(acceptedTranslations))
             put("CEFR", cefr)
+            put("HIERARHY_ID", hierarchyId)
         }
         return db.update("QUESTIONS", values, "ID = ?", arrayOf(questionId.toString())) == 1
+    }
+
+    fun replaceHierarchyTree(nodes: List<HierarchyNode>) {
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            db.delete("HIERARHY", null, null)
+            fun insertNode(node: HierarchyNode, parentId: Long?): Long {
+                val id = db.insertOrThrow(
+                    "HIERARHY",
+                    null,
+                    ContentValues().apply {
+                        put("PARENT_ID", parentId)
+                        put("NAME", node.name)
+                    },
+                )
+                node.children.forEach { child -> insertNode(child, id) }
+                return id
+            }
+            nodes.forEach { insertNode(it, null) }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    fun loadHierarchyTree(parentId: Long? = null): List<HierarchyNode> {
+        val rows = readableDatabase.query(
+            "HIERARHY",
+            arrayOf("ID", "PARENT_ID", "NAME"),
+            if (parentId == null) "PARENT_ID IS NULL" else "PARENT_ID = ?",
+            if (parentId == null) null else arrayOf(parentId.toString()),
+            null,
+            null,
+            "ID",
+        )
+        val result = mutableListOf<HierarchyNode>()
+        rows.use { cursor ->
+            while (cursor.moveToNext()) {
+                val id = cursor.getLong(0)
+                val node = HierarchyNode(
+                    id = id,
+                    parentId = if (cursor.isNull(1)) null else cursor.getLong(1),
+                    name = cursor.getString(2),
+                    children = loadHierarchyTree(id).toMutableList(),
+                    isFile = false,
+                )
+                result += node
+            }
+        }
+        return result
     }
 
     fun startSession(startedAt: Long = System.currentTimeMillis()): Long {
@@ -406,6 +500,6 @@ class PracticeDatabase(context: Context) : SQLiteOpenHelper(
 
     companion object {
         private const val DATABASE_NAME = "voice_practice.db"
-        private const val DATABASE_VERSION = 4
+        private const val DATABASE_VERSION = 5
     }
 }
