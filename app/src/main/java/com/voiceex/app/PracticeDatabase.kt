@@ -290,7 +290,30 @@ class PracticeDatabase(context: Context) : SQLiteOpenHelper(
 
         db.beginTransaction()
         try {
+            db.execSQL("UPDATE QUESTIONS SET ACTIVE = 0 WHERE HIERARHY_ID IS NULL")
             val synced = nodes.map { syncNode(it, null) }
+            val retainedIds = mutableSetOf<Long>()
+            fun collectIds(items: List<HierarchyNode>) {
+                items.forEach { node ->
+                    node.id?.let(retainedIds::add)
+                    collectIds(node.children)
+                }
+            }
+            collectIds(synced)
+            val staleIds = mutableListOf<Long>()
+            db.query("HIERARHY", arrayOf("ID"), null, null, null, null, "ID DESC").use { cursor ->
+                while (cursor.moveToNext()) {
+                    val id = cursor.getLong(0)
+                    if (id !in retainedIds) staleIds += id
+                }
+            }
+            staleIds.forEach { id ->
+                db.execSQL(
+                    "UPDATE QUESTIONS SET ACTIVE = 0, HIERARHY_ID = NULL WHERE HIERARHY_ID = ?",
+                    arrayOf(id),
+                )
+                db.delete("HIERARHY", "ID = ?", arrayOf(id.toString()))
+            }
             db.setTransactionSuccessful()
             return synced
         } finally {

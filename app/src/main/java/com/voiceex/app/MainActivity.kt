@@ -189,8 +189,6 @@ class MainActivity : androidx.activity.ComponentActivity() {
         loadSavedAnswerCheckDelay()
         loadSavedRecognitionLanguage()
         loadSavedOfflineRecognition()
-        loadSavedPhrases()
-        loadSavedWords()
         loadAssetDictionaries()
         setContent {
             MaterialTheme(colorScheme = lightColorScheme(
@@ -587,32 +585,47 @@ class MainActivity : androidx.activity.ComponentActivity() {
                 ?.toSet()
             val fileTree = buildAssetHierarchyTree(assets)
             val initialSelection = storedSelection ?: allAssetFilePaths(fileTree)
+            val parsedFiles = allAssetFiles(fileTree)
+                .filter { isDictionaryAsset(it.name) }
+                .associate { file ->
+                    val content = assets.open(file.assetPath)
+                        .bufferedReader(Charsets.UTF_8)
+                        .use { it.readText() }
+                    file.assetPath to parseAssetQuestions(file.assetPath, content)
+                }
             val hierarchy = practiceDatabase.syncHierarchyTree(
                 applyAssetSelection(fileTree, initialSelection),
             )
             val loadedQuestions = linkedMapOf<String, List<Phrase>>()
-            allAssetFiles(hierarchy).forEach { file ->
+            allAssetFiles(hierarchy)
+                .filter { isDictionaryAsset(it.name) }
+                .forEach { file ->
                 val hierarchyId = file.id ?: error("Hierarchy ID was not created for ${file.assetPath}.")
-                val savedQuestions = practiceDatabase.loadQuestionsForHierarchy(hierarchyId)
-                val questions = if (savedQuestions.isNotEmpty()) {
-                    savedQuestions
-                } else {
-                    val content = assets.open(file.assetPath)
-                        .bufferedReader(Charsets.UTF_8)
-                        .use { it.readText() }
-                    val parsed = if (isWordAsset(file.name)) {
-                        WordParser.parse(content)
-                    } else {
-                        PhraseParser.parse(content)
-                    }
-                    practiceDatabase.replaceQuestionsForHierarchy(hierarchyId, parsed)
-                }
+                val questions = practiceDatabase.replaceQuestionsForHierarchy(
+                    hierarchyId,
+                    parsedFiles.getValue(file.assetPath),
+                )
                 loadedQuestions[file.assetPath] = questions
             }
             updateState {
                 copy(
                     assetHierarchy = hierarchy,
                     assetQuestions = loadedQuestions,
+                    phrases = loadedQuestions
+                        .filterKeys { !it.substringAfterLast('/').startsWith("word", ignoreCase = true) }
+                        .values
+                        .flatten(),
+                    wordQuestions = loadedQuestions
+                        .filterKeys { it.substringAfterLast('/').startsWith("word", ignoreCase = true) }
+                        .values
+                        .flatten(),
+                    sourceText = PhraseParser.format(
+                        loadedQuestions
+                            .filterKeys { !it.substringAfterLast('/').startsWith("word", ignoreCase = true) }
+                            .values
+                            .flatten(),
+                    ),
+                    loadStatus = "Loaded ${loadedQuestions.values.sumOf { it.size }} questions from ${loadedQuestions.size} asset files.",
                 )
             }
         }.onFailure { error ->
@@ -628,62 +641,6 @@ class MainActivity : androidx.activity.ComponentActivity() {
             .putStringSet(SELECTED_ASSET_PATHS_KEY, selectedPaths)
             .apply()
         updateState { copy(assetHierarchy = nodes) }
-    }
-
-    private fun loadSavedPhrases() {
-        val saved = getPreferences(MODE_PRIVATE).getString(PHRASES_KEY, null)
-        runCatching {
-            var phrases = practiceDatabase.loadActiveQuestions()
-            val loadedFromDatabase = phrases.isNotEmpty()
-            if (!loadedFromDatabase) {
-                val content = saved ?: assets.open("phrases.txt")
-                    .bufferedReader(Charsets.UTF_8).use { it.readText() }
-                phrases = practiceDatabase.replaceActiveQuestions(PhraseParser.parse(content))
-            }
-            if (phrases.isEmpty()) {
-                updateState { copy(loadStatus = "The list contains no phrases.") }
-                return
-            }
-            getPreferences(MODE_PRIVATE).edit().remove(PHRASES_KEY).apply()
-            val content = PhraseParser.format(phrases)
-            val savedIndex = getPreferences(MODE_PRIVATE)
-                .getInt(CURRENT_INDEX_KEY, 0)
-                .coerceIn(0, phrases.size)
-            updateState {
-                copy(
-                    sourceText = content,
-                    phrases = phrases,
-                    currentIndex = savedIndex,
-                    firstTryRating = FirstTryRating(),
-                    loadStatus = if (loadedFromDatabase) {
-                        "Question database loaded. Phrases: ${phrases.size}."
-                    } else {
-                        "Sample or saved list imported into the question database. Phrases: ${phrases.size}."
-                    },
-                )
-            }
-        }.onFailure { error ->
-            updateState { copy(loadStatus = "Could not load the question database: ${error.message}") }
-        }
-    }
-
-    private fun loadSavedWords() {
-        runCatching {
-            var words = practiceDatabase.loadActiveQuestions(isWord = true)
-            if (words.isEmpty()) {
-                val content = assets.open("Words.txt")
-                    .bufferedReader(Charsets.UTF_8).use { it.readText() }
-                words = practiceDatabase.replaceActiveQuestions(WordParser.parse(content))
-            }
-            updateState {
-                copy(
-                    wordQuestions = words,
-                    dictionaryStatus = "Word dictionary loaded. Words: ${words.size}.",
-                )
-            }
-        }.onFailure { error ->
-            updateState { copy(dictionaryStatus = "Could not load Words.txt: ${error.message}") }
-        }
     }
 
     private fun loadVoices() {
@@ -2097,7 +2054,8 @@ private fun buildAssetHierarchyTree(
     return roots
 }
 
-private fun isWordAsset(name: String): Boolean = name.startsWith("word", ignoreCase = true)
+private fun isDictionaryAsset(name: String): Boolean =
+    name.endsWith(".txt", ignoreCase = true) || name.endsWith(".csv", ignoreCase = true)
 
 private fun allAssetFiles(nodes: List<HierarchyNode>): List<HierarchyNode> =
     nodes.flatMap { node -> if (node.isFile) listOf(node) else allAssetFiles(node.children) }
@@ -2319,7 +2277,7 @@ private fun AssetDictionaryScreen(
         if (questionEditorOpen) {
             DictionaryQuestionDialog(
                 question = questionBeingEdited,
-                isWord = isWordAsset(file.name),
+                isWord = file.name.startsWith("word", ignoreCase = true),
                 onDismiss = { questionEditorOpen = false },
                 onSave = { prompt, translation, cefr ->
                     val hierarchyId = file.id
@@ -2331,7 +2289,7 @@ private fun AssetDictionaryScreen(
                         prompt,
                         translation,
                         cefr,
-                        isWordAsset(file.name),
+                        file.name.startsWith("word", ignoreCase = true),
                     )
                     if (saved) questionEditorOpen = false
                     saved

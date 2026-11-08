@@ -24,6 +24,13 @@ fun questionsFromSelectedAssets(
     .filter { it.key in selectedAssetPaths }
     .flatMap { it.value }
 
+fun parseAssetQuestions(assetPath: String, content: String): List<Phrase> =
+    if (assetPath.substringAfterLast('/').startsWith("word", ignoreCase = true)) {
+        WordParser.parse(content)
+    } else {
+        PhraseParser.parse(content)
+    }
+
 class FirstTryRating private constructor(
     val attemptedPhraseIndexes: Set<Int>,
     val correctFirstTryPhraseIndexes: Set<Int>,

@@ -56,6 +56,26 @@ class PhraseTest {
     }
 
     @Test
+    fun parsesEachAssetFileUsingItsOwnContentAndName() {
+        assertEquals(
+            listOf(Phrase("дом", "house", cefr = "A1", isWord = true)),
+            parseAssetQuestions("Words.txt", "дом | house | A1"),
+        )
+        assertEquals(
+            listOf(Phrase("слово", "word", cefr = "A1", isWord = true)),
+            parseAssetQuestions("words.txt", "слово | word | A1"),
+        )
+        assertEquals(
+            listOf(Phrase("A", "B")),
+            parseAssetQuestions("phrases_B1_B2.txt", "A | B"),
+        )
+        assertEquals(
+            listOf(Phrase("C", "D")),
+            parseAssetQuestions("phrases.txt", "C | D"),
+        )
+    }
+
+    @Test
     fun includesOnlyQuestionsFromSelectedAssetFiles() {
         val basicPhrases = listOf(Phrase("basic phrase", "translation"))
         val advancedPhrases = listOf(Phrase("advanced phrase", "translation"))
