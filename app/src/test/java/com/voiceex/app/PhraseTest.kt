@@ -56,19 +56,54 @@ class PhraseTest {
     }
 
     @Test
-    fun includesOnlyQuestionsFromSelectedAssets() {
-        val phrases = listOf(Phrase("phrase", "translation"))
+    fun includesOnlyQuestionsFromSelectedAssetFiles() {
+        val basicPhrases = listOf(Phrase("basic phrase", "translation"))
+        val advancedPhrases = listOf(Phrase("advanced phrase", "translation"))
         val words = listOf(Phrase("word", "translation", isWord = true))
+        val assetQuestions = mapOf(
+            "phrases.txt" to basicPhrases,
+            "phrases_B1_B2.txt" to advancedPhrases,
+            "Words.txt" to words,
+            "words.txt" to emptyList(),
+        )
 
         assertEquals(
-            listOf(words.single()),
-            questionsForSelectedAssets(phrases, words, setOf("vocabulary/Words.txt")),
+            listOf(advancedPhrases.single()),
+            questionsFromSelectedAssets(assetQuestions, setOf("phrases_B1_B2.txt")),
         )
         assertEquals(
-            listOf(phrases.single()),
-            questionsForSelectedAssets(phrases, words, setOf("phrases.txt")),
+            listOf(basicPhrases.single(), words.single()),
+            questionsFromSelectedAssets(assetQuestions, setOf("Words.txt", "phrases.txt")),
         )
-        assertTrue(questionsForSelectedAssets(phrases, words, emptySet()).isEmpty())
+        assertTrue(questionsFromSelectedAssets(assetQuestions, emptySet()).isEmpty())
+    }
+
+    @Test
+    fun assetCheckboxUpdatesSubtreeAndParentIndeterminateState() {
+        val tree = listOf(
+            HierarchyNode(
+                name = "phrases",
+                assetPath = "phrases",
+                children = listOf(
+                    HierarchyNode(name = "one.txt", assetPath = "phrases/one.txt", isFile = true, selected = true),
+                    HierarchyNode(name = "two.txt", assetPath = "phrases/two.txt", isFile = true, selected = true),
+                ),
+                selected = true,
+            ),
+        )
+
+        val oneUnchecked = setAssetNodeChecked(tree, "phrases/one.txt", checked = false)
+        assertTrue(oneUnchecked.single().indeterminate)
+        assertEquals(setOf("phrases/two.txt"), selectedAssetPaths(oneUnchecked))
+
+        val allChecked = setAssetNodeChecked(oneUnchecked, "phrases", checked = true)
+        assertTrue(allChecked.single().selected)
+        assertEquals(setOf("phrases/one.txt", "phrases/two.txt"), selectedAssetPaths(allChecked))
+
+        val allUnchecked = setAssetNodeChecked(allChecked, "phrases", checked = false)
+        assertFalse(allUnchecked.single().selected)
+        assertFalse(allUnchecked.single().indeterminate)
+        assertTrue(selectedAssetPaths(allUnchecked).isEmpty())
     }
 
     @Test

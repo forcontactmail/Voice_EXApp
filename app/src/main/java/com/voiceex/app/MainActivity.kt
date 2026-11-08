@@ -24,6 +24,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -33,6 +34,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -45,9 +47,9 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.ui.window.Dialog
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -57,6 +59,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.TriStateCheckbox
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -66,6 +69,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.state.ToggleableState
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -138,13 +142,10 @@ private data class PracticeUiState(
     val historyStatus: String = "",
     val dictionaryStatus: String = "",
     val assetHierarchy: List<HierarchyNode> = emptyList(),
+    val assetQuestions: Map<String, List<Phrase>> = emptyMap(),
 ) {
     val activeQuestions: List<Phrase>
-        get() = questionsForSelectedAssets(
-            phrases = phrases,
-            words = wordQuestions,
-            selectedAssetPaths = selectedAssetPaths(assetHierarchy),
-        )
+        get() = questionsFromSelectedAssets(assetQuestions, selectedAssetPaths(assetHierarchy))
 }
 
 class MainActivity : androidx.activity.ComponentActivity() {
@@ -190,7 +191,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
         loadSavedOfflineRecognition()
         loadSavedPhrases()
         loadSavedWords()
-        updateState { copy(assetHierarchy = buildAssetHierarchyTree(assets)) }
+        loadAssetDictionaries()
         setContent {
             MaterialTheme(colorScheme = lightColorScheme(
                 primary = Green,
@@ -204,9 +205,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
                 Surface(modifier = Modifier.fillMaxSize(), color = Paper) {
                     VoicePracticeScreen(
                         state = uiState,
-                        onHierarchyChanged = { nodes ->
-                            updateState { copy(assetHierarchy = nodes) }
-                        },
+                        onHierarchyChanged = ::saveAssetHierarchySelection,
                         onStartPractice = {
                             when {
                                 uiState.isPaused -> resumePractice()
@@ -230,7 +229,6 @@ class MainActivity : androidx.activity.ComponentActivity() {
                         onOpenHistory = ::loadHistory,
                         onSaveDictionaryQuestion = ::saveDictionaryQuestion,
                         onShowHistoryDetails = ::showHistoryDetails,
-                        onImportWords = ::importWords,
                     )
                 }
             }
@@ -582,19 +580,54 @@ class MainActivity : androidx.activity.ComponentActivity() {
         }
     }
 
-    private fun readAssetTreeTexts(baseDir: String = ""): List<String> {
-        val files = mutableListOf<String>()
-        val entries = assets.list(baseDir).orEmpty()
-        entries.forEach { entry ->
-            val path = if (baseDir.isEmpty()) entry else "$baseDir/$entry"
-            val nestedEntries = assets.list(path).orEmpty()
-            if (nestedEntries.isNotEmpty()) {
-                files += readAssetTreeTexts(path)
-            } else if (entry.endsWith(".txt", ignoreCase = true) || entry.endsWith(".csv", ignoreCase = true)) {
-                files += path
+    private fun loadAssetDictionaries() {
+        runCatching {
+            val storedSelection = getPreferences(MODE_PRIVATE)
+                .getStringSet(SELECTED_ASSET_PATHS_KEY, null)
+                ?.toSet()
+            val fileTree = buildAssetHierarchyTree(assets)
+            val initialSelection = storedSelection ?: allAssetFilePaths(fileTree)
+            val hierarchy = practiceDatabase.syncHierarchyTree(
+                applyAssetSelection(fileTree, initialSelection),
+            )
+            val loadedQuestions = linkedMapOf<String, List<Phrase>>()
+            allAssetFiles(hierarchy).forEach { file ->
+                val hierarchyId = file.id ?: error("Hierarchy ID was not created for ${file.assetPath}.")
+                val savedQuestions = practiceDatabase.loadQuestionsForHierarchy(hierarchyId)
+                val questions = if (savedQuestions.isNotEmpty()) {
+                    savedQuestions
+                } else {
+                    val content = assets.open(file.assetPath)
+                        .bufferedReader(Charsets.UTF_8)
+                        .use { it.readText() }
+                    val parsed = if (isWordAsset(file.name)) {
+                        WordParser.parse(content)
+                    } else {
+                        PhraseParser.parse(content)
+                    }
+                    practiceDatabase.replaceQuestionsForHierarchy(hierarchyId, parsed)
+                }
+                loadedQuestions[file.assetPath] = questions
+            }
+            updateState {
+                copy(
+                    assetHierarchy = hierarchy,
+                    assetQuestions = loadedQuestions,
+                )
+            }
+        }.onFailure { error ->
+            updateState {
+                copy(dictionaryStatus = "Could not load asset dictionaries: ${error.message}")
             }
         }
-        return files
+    }
+
+    private fun saveAssetHierarchySelection(nodes: List<HierarchyNode>) {
+        val selectedPaths = selectedAssetPaths(nodes)
+        getPreferences(MODE_PRIVATE).edit()
+            .putStringSet(SELECTED_ASSET_PATHS_KEY, selectedPaths)
+            .apply()
+        updateState { copy(assetHierarchy = nodes) }
     }
 
     private fun loadSavedPhrases() {
@@ -603,16 +636,8 @@ class MainActivity : androidx.activity.ComponentActivity() {
             var phrases = practiceDatabase.loadActiveQuestions()
             val loadedFromDatabase = phrases.isNotEmpty()
             if (!loadedFromDatabase) {
-                val content = saved ?: run {
-                    val fallbackFiles = readAssetTreeTexts()
-                    val assetText = fallbackFiles.firstNotNullOfOrNull { file ->
-                        runCatching {
-                            assets.open(file).bufferedReader(Charsets.UTF_8).use { it.readText() }
-                        }.getOrNull()
-                    }
-                    assetText ?: assets.open("phrases.txt")
-                        .bufferedReader(Charsets.UTF_8).use { it.readText() }
-                }
+                val content = saved ?: assets.open("phrases.txt")
+                    .bufferedReader(Charsets.UTF_8).use { it.readText() }
                 phrases = practiceDatabase.replaceActiveQuestions(PhraseParser.parse(content))
             }
             if (phrases.isEmpty()) {
@@ -646,12 +671,8 @@ class MainActivity : androidx.activity.ComponentActivity() {
         runCatching {
             var words = practiceDatabase.loadActiveQuestions(isWord = true)
             if (words.isEmpty()) {
-                val content = run {
-                    val fallbackFile = readAssetTreeTexts().firstOrNull { it.contains("word", ignoreCase = true) }
-                    fallbackFile?.let { file ->
-                        assets.open(file).bufferedReader(Charsets.UTF_8).use { it.readText() }
-                    } ?: assets.open("Words.txt").bufferedReader(Charsets.UTF_8).use { it.readText() }
-                }
+                val content = assets.open("Words.txt")
+                    .bufferedReader(Charsets.UTF_8).use { it.readText() }
                 words = practiceDatabase.replaceActiveQuestions(WordParser.parse(content))
             }
             updateState {
@@ -1386,49 +1407,9 @@ class MainActivity : androidx.activity.ComponentActivity() {
             }
     }
 
-    private fun importWords() {
-        openWordsDocument.launch(arrayOf("text/*", "application/octet-stream"))
-    }
-
-    private val openWordsDocument =
-        registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-            if (uri == null) return@registerForActivityResult
-            runCatching {
-                contentResolver.openInputStream(uri)?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }
-                    ?: error("Could not open the selected words file.")
-            }.onSuccess(::saveWords)
-                .onFailure { error ->
-                    updateState { copy(dictionaryStatus = "Could not read words file: ${error.message}") }
-                }
-        }
-
-    private fun saveWords(content: String) {
-        runCatching { WordParser.parse(content) }
-            .onSuccess { words ->
-                if (words.isEmpty()) {
-                    updateState { copy(dictionaryStatus = "Add at least one word and translation.") }
-                    return
-                }
-                runCatching {
-                    practiceDatabase.replaceActiveQuestions(words)
-                    practiceDatabase.loadActiveQuestions(isWord = true)
-                }.onSuccess { savedWords ->
-                    updateState {
-                        copy(
-                            wordQuestions = savedWords,
-                            dictionaryStatus = "Words saved to the dictionary. Words: ${savedWords.size}.",
-                        )
-                    }
-                }.onFailure { error ->
-                    updateState { copy(dictionaryStatus = "Could not save word dictionary: ${error.message}") }
-                }
-            }
-            .onFailure { error ->
-                updateState { copy(dictionaryStatus = "Could not parse word dictionary: ${error.message}") }
-            }
-    }
-
     private fun saveDictionaryQuestion(
+        assetPath: String,
+        hierarchyId: Long,
         questionId: Long?,
         prompt: String,
         translation: String,
@@ -1437,33 +1418,22 @@ class MainActivity : androidx.activity.ComponentActivity() {
     ): Boolean {
         return runCatching {
             if (questionId == null) {
-                practiceDatabase.addQuestion(prompt, translation, cefr, isWord)
+                practiceDatabase.addQuestion(prompt, translation, cefr, isWord, hierarchyId)
             } else {
-                check(practiceDatabase.updateQuestion(questionId, prompt, translation, cefr)) {
+                check(practiceDatabase.updateQuestion(questionId, prompt, translation, cefr, hierarchyId)) {
                     "Question $questionId no longer exists."
                 }
             }
-            practiceDatabase.loadActiveQuestions(isWord)
+            practiceDatabase.loadQuestionsForHierarchy(hierarchyId)
         }.onSuccess { questions ->
-            if (!isWord) getPreferences(MODE_PRIVATE).edit().remove(PHRASES_KEY).apply()
             updateState {
                 copy(
-                    phrases = if (isWord) phrases else questions,
-                    wordQuestions = if (isWord) questions else wordQuestions,
-                    sourceText = if (isWord) sourceText else PhraseParser.format(questions),
-                    loadStatus = if (isWord) loadStatus else "Phrase question ${if (questionId == null) "added" else "saved"}.",
-                    dictionaryStatus = if (isWord) {
-                        "Word ${if (questionId == null) "added to" else "saved in"} the dictionary."
-                    } else {
-                        dictionaryStatus
-                    },
+                    assetQuestions = assetQuestions + (assetPath to questions),
+                    dictionaryStatus = "${if (questionId == null) "Added" else "Saved"} question in $assetPath.",
                 )
             }
         }.onFailure { error ->
-            updateState {
-                if (isWord) copy(dictionaryStatus = "Could not save question: ${error.message}")
-                else copy(loadStatus = "Could not save question: ${error.message}")
-            }
+            updateState { copy(dictionaryStatus = "Could not save question in $assetPath: ${error.message}") }
         }.isSuccess
     }
 
@@ -1557,6 +1527,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
         private const val RECOGNITION_LANGUAGE_KEY = "voicePractice.recognitionLanguage"
         private const val OFFLINE_RECOGNITION_KEY = "voicePractice.offlineRecognition"
         private const val ANSWER_CHECK_DELAY_KEY = "voicePractice.answerCheckDelayHalfSeconds"
+        private const val SELECTED_ASSET_PATHS_KEY = "voicePractice.selectedAssetPaths"
     }
 }
 
@@ -1574,9 +1545,8 @@ private fun VoicePracticeScreen(
     onOfflineRecognitionChange: (Boolean) -> Unit,
     onAnswerCheckDelayChange: (Int) -> Unit,
     onOpenHistory: () -> Unit,
-    onSaveDictionaryQuestion: (Long?, String, String, String, Boolean) -> Boolean,
+    onSaveDictionaryQuestion: (String, Long, Long?, String, String, String, Boolean) -> Boolean,
     onShowHistoryDetails: (Long, Boolean) -> Unit,
-    onImportWords: () -> Unit,
 ) {
     var editorOpen by remember { mutableStateOf(false) }
     var editorContent by remember(state.sourceText) { mutableStateOf(state.sourceText) }
@@ -1807,15 +1777,12 @@ private fun VoicePracticeScreen(
                 lineHeight = 16.sp,
             )
         } else if (dictionaryOpen) {
-            QuestionCefrEditor(
-                phrases = state.phrases,
-                words = state.wordQuestions,
-                status = state.loadStatus,
-                dictionaryStatus = state.dictionaryStatus,
+            AssetDictionaryScreen(
                 assetHierarchy = state.assetHierarchy,
+                assetQuestions = state.assetQuestions,
+                status = state.dictionaryStatus,
                 onHierarchyChanged = onHierarchyChanged,
                 onSaveQuestion = onSaveDictionaryQuestion,
-                onImportWords = onImportWords,
             )
         } else if (historyOpen) {
             if (historyDetailOpen) {
@@ -2105,100 +2072,93 @@ private fun HistoryQuestionDetails(
     }
 }
 
-private fun buildAssetHierarchyTree(assetManager: AssetManager, baseDir: String = ""): List<HierarchyNode> {
+private fun buildAssetHierarchyTree(
+    assetManager: AssetManager,
+    baseDir: String = "",
+    parentPath: String = "",
+): List<HierarchyNode> {
     val roots = mutableListOf<HierarchyNode>()
-    val entries = runCatching { assetManager.list(baseDir) ?: emptyArray<String>() }.getOrDefault(emptyArray())
+    val entries = assetManager.list(baseDir).orEmpty()
     entries.sorted().forEach { name ->
         val path = if (baseDir.isEmpty()) name else "$baseDir/$name"
-        val nested = runCatching { assetManager.list(path) ?: emptyArray<String>() }.getOrDefault(emptyArray())
+        val nested = assetManager.list(path).orEmpty()
+        val assetPath = if (parentPath.isEmpty()) name else "$parentPath/$name"
         val node = if (nested.isNotEmpty()) {
             HierarchyNode(
                 name = name,
-                isFile = false,
-                children = buildAssetHierarchyTree(assetManager, path).toMutableList(),
+                assetPath = assetPath,
+                children = buildAssetHierarchyTree(assetManager, path, assetPath),
             )
-        } else if (name.endsWith(".txt", ignoreCase = true) || name.endsWith(".csv", ignoreCase = true)) {
-            HierarchyNode(name = name, isFile = true)
-        } else null
-        if (node != null) {
-            node.children.forEach { child -> child.parent = node }
-            node.selected = true
-            roots += node
+        } else {
+            HierarchyNode(name = name, assetPath = assetPath, isFile = true)
         }
+        roots += node
     }
     return roots
 }
 
-private fun selectedAssetPaths(nodes: List<HierarchyNode>, prefix: String = ""): Set<String> {
-    val selected = mutableSetOf<String>()
-    nodes.forEach { node ->
-        val current = if (prefix.isEmpty()) node.name else "$prefix/${node.name}"
-        when {
-            node.isFile && (node.selected || node.indeterminate) -> selected += current
-            !node.isFile && node.selected -> selected += collectSubtreePaths(node, current)
-            !node.isFile && node.indeterminate -> selected += selectedAssetPaths(node.children, current)
+private fun isWordAsset(name: String): Boolean = name.startsWith("word", ignoreCase = true)
+
+private fun allAssetFiles(nodes: List<HierarchyNode>): List<HierarchyNode> =
+    nodes.flatMap { node -> if (node.isFile) listOf(node) else allAssetFiles(node.children) }
+
+private fun allAssetFilePaths(nodes: List<HierarchyNode>): Set<String> =
+    allAssetFiles(nodes).mapTo(mutableSetOf()) { it.assetPath }
+
+internal fun selectedAssetPaths(nodes: List<HierarchyNode>): Set<String> =
+    allAssetFiles(nodes).filter { it.selected }.mapTo(mutableSetOf()) { it.assetPath }
+
+private fun applyAssetSelection(nodes: List<HierarchyNode>, selectedPaths: Set<String>): List<HierarchyNode> =
+    nodes.map { node ->
+        val children = applyAssetSelection(node.children, selectedPaths)
+        if (node.isFile) {
+            node.copy(
+                selected = node.assetPath in selectedPaths,
+                indeterminate = false,
+            )
+        } else {
+            val selectedCount = children.count { it.selected }
+            val partialCount = children.count { it.indeterminate }
+            val allSelected = children.isNotEmpty() && selectedCount == children.size
+            node.copy(
+                children = children,
+                selected = allSelected,
+                indeterminate = !allSelected && (selectedCount > 0 || partialCount > 0),
+            )
         }
     }
-    return selected
-}
 
-private fun collectSubtreePaths(node: HierarchyNode, prefix: String): Set<String> {
-    val paths = mutableSetOf<String>()
-    if (node.isFile) {
-        paths += prefix
-        return paths
-    }
-    node.children.forEach { child ->
-        val childPath = "$prefix/${child.name}"
-        if (child.isFile) paths += childPath else paths += collectSubtreePaths(child, childPath)
-    }
-    return paths
-}
-
-private fun toggleHierarchyNode(node: HierarchyNode) {
-    val nextSelected = !(node.selected || node.indeterminate)
-    fun applyChildren(current: HierarchyNode) {
-        current.children.forEach { child ->
-            child.selected = nextSelected
-            child.indeterminate = false
-            applyChildren(child)
+internal fun setAssetNodeChecked(
+    nodes: List<HierarchyNode>,
+    assetPath: String,
+    checked: Boolean,
+): List<HierarchyNode> {
+    fun findNode(items: List<HierarchyNode>): HierarchyNode? =
+        items.firstNotNullOfOrNull { node ->
+            if (node.assetPath == assetPath) node else findNode(node.children)
         }
-    }
-    node.selected = nextSelected
-    node.indeterminate = false
-    applyChildren(node)
-    var parent = node.parent
-    while (parent != null) {
-        val children = parent.children
-        val checkedCount = children.count { it.selected }
-        val indeterminateCount = children.count { it.indeterminate }
-        parent.selected = checkedCount == children.size && children.isNotEmpty()
-        parent.indeterminate = (checkedCount in 1 until children.size) || indeterminateCount > 0
-        if (parent.selected) parent.indeterminate = false
-        parent = parent.parent
-    }
-}
-
-private fun recalculateHierarchyNodeState(node: HierarchyNode) {
-    if (node.children.isEmpty()) return
-    val checkedCount = node.children.count { it.selected }
-    val indeterminateCount = node.children.count { it.indeterminate }
-    node.selected = checkedCount == node.children.size && node.children.isNotEmpty()
-    node.indeterminate = (checkedCount in 1 until node.children.size) || indeterminateCount > 0
-    if (node.selected) node.indeterminate = false
+    val changed = findNode(nodes)
+    val subtreePaths = changed?.let { allAssetFilePaths(listOf(it)) }.orEmpty()
+    val selectedPaths = selectedAssetPaths(nodes).toMutableSet()
+    if (checked) selectedPaths += subtreePaths else selectedPaths -= subtreePaths
+    return applyAssetSelection(nodes, selectedPaths)
 }
 
 @Composable
 private fun HierarchyTreePicker(
     nodes: List<HierarchyNode>,
     onNodesChanged: (List<HierarchyNode>) -> Unit,
+    onOpenFile: (HierarchyNode) -> Unit,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         nodes.forEach { node ->
-            HierarchyNodeRow(node = node, depth = 0, onChange = { changedNode ->
-                toggleHierarchyNode(changedNode)
-                onNodesChanged(nodes)
-            })
+            HierarchyNodeRow(
+                node = node,
+                depth = 0,
+                rootNodes = nodes,
+                onChange = onNodesChanged,
+                onOpenFile = onOpenFile,
+            )
         }
     }
 }
@@ -2207,7 +2167,9 @@ private fun HierarchyTreePicker(
 private fun HierarchyNodeRow(
     node: HierarchyNode,
     depth: Int,
-    onChange: (HierarchyNode) -> Unit,
+    rootNodes: List<HierarchyNode>,
+    onChange: (List<HierarchyNode>) -> Unit,
+    onOpenFile: (HierarchyNode) -> Unit,
 ) {
     Column {
         Row(
@@ -2215,148 +2177,163 @@ private fun HierarchyNodeRow(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Spacer(Modifier.width((depth * 16).dp))
-            Checkbox(
-                checked = node.selected || node.indeterminate,
-                onCheckedChange = { onChange(node) },
-                enabled = true,
+            TriStateCheckbox(
+                state = when {
+                    node.indeterminate -> ToggleableState.Indeterminate
+                    node.selected -> ToggleableState.On
+                    else -> ToggleableState.Off
+                },
+                onClick = {
+                    onChange(setAssetNodeChecked(rootNodes, node.assetPath, !node.selected))
+                },
             )
             Text(
                 node.name,
-                color = if (node.indeterminate) Coral else Ink,
+                color = if (node.isFile) GreenDark else Ink,
                 fontSize = 12.sp,
-                modifier = Modifier.weight(1f),
+                modifier = Modifier
+                    .weight(1f)
+                    .clickable(enabled = node.isFile) { onOpenFile(node) },
             )
         }
         if (node.children.isNotEmpty()) {
             node.children.forEach { child ->
-                HierarchyNodeRow(child, depth + 1, onChange)
+                HierarchyNodeRow(child, depth + 1, rootNodes, onChange, onOpenFile)
             }
         }
     }
 }
 
 @Composable
-private fun QuestionCefrEditor(
-    phrases: List<Phrase>,
-    words: List<Phrase>,
-    status: String,
-    dictionaryStatus: String,
+private fun AssetDictionaryScreen(
     assetHierarchy: List<HierarchyNode>,
+    assetQuestions: Map<String, List<Phrase>>,
+    status: String,
     onHierarchyChanged: (List<HierarchyNode>) -> Unit,
-    onSaveQuestion: (Long?, String, String, String, Boolean) -> Boolean,
-    onImportWords: () -> Unit,
+    onSaveQuestion: (String, Long, Long?, String, String, String, Boolean) -> Boolean,
 ) {
-    var showWords by remember { mutableStateOf(false) }
+    var openedFile by remember { mutableStateOf<HierarchyNode?>(null) }
     var questionBeingEdited by remember { mutableStateOf<Phrase?>(null) }
-    var addQuestionOpen by remember { mutableStateOf(false) }
-    val questions = if (showWords) words else phrases
+    var questionEditorOpen by remember { mutableStateOf(false) }
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Text("Dictionary", color = Ink, fontSize = 28.sp, fontFamily = FontFamily.Serif)
         Text(
-            "Choose phrase questions or vocabulary words. Edit the text and CEFR level in the list.",
+            "Asset files: ${allAssetFiles(assetHierarchy).size}. Tap a file to open its dictionary.",
             color = Muted,
             fontSize = 13.sp,
             lineHeight = 19.sp,
         )
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            if (showWords) {
-                OutlinedButton(onClick = { showWords = false }) { Text("Phrase questions") }
-                Button(
-                    onClick = { showWords = true },
-                    colors = ButtonDefaults.buttonColors(containerColor = Green),
-                ) { Text("Words") }
-            } else {
-                Button(
-                    onClick = { showWords = false },
-                    colors = ButtonDefaults.buttonColors(containerColor = Green),
-                ) { Text("Phrase questions") }
-                OutlinedButton(onClick = { showWords = true }) { Text("Words") }
-            }
-        }
-        if (showWords) {
-            OutlinedButton(onClick = onImportWords) { Text("Import Words.txt") }
-        }
-        val visibleStatus = if (showWords) dictionaryStatus else status
-        if (visibleStatus.isNotBlank()) {
+        if (status.isNotBlank()) {
             Text(
-                visibleStatus,
-                color = if (visibleStatus.startsWith("Could not")) Coral else GreenDark,
+                status,
+                color = if (status.startsWith("Could not")) Coral else GreenDark,
                 fontSize = 12.sp,
             )
         }
-        Text(
-            "CEFR levels are estimated for new phrases and can be changed manually. New words default to A1. The IS_WORD category is set automatically.",
-            color = Muted,
-            fontSize = 12.sp,
-            lineHeight = 17.sp,
-        )
-        Text("Asset hierarchy", color = Ink, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
         HierarchyTreePicker(
             nodes = assetHierarchy,
             onNodesChanged = onHierarchyChanged,
+            onOpenFile = { openedFile = it },
         )
-        Button(
-            onClick = {
-                questionBeingEdited = null
-                addQuestionOpen = true
-            },
-            colors = ButtonDefaults.buttonColors(containerColor = Green),
-        ) { Text("Add") }
-        questions.forEach { phrase ->
-            Card(
-                colors = CardDefaults.cardColors(containerColor = Color.White),
-                shape = RoundedCornerShape(12.dp),
+    }
+    openedFile?.let { file ->
+        val questions = assetQuestions[file.assetPath].orEmpty()
+        Dialog(onDismissRequest = {
+            openedFile = null
+            questionEditorOpen = false
+        }) {
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(18.dp),
+                color = Color.White,
             ) {
-                Row(
+                Column(
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 12.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        .heightIn(max = 680.dp)
+                        .verticalScroll(rememberScrollState())
+                        .padding(18.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            file.assetPath,
+                            color = Ink,
+                            fontSize = 20.sp,
+                            fontFamily = FontFamily.Serif,
+                            modifier = Modifier.weight(1f),
+                        )
+                        TextButton(onClick = { openedFile = null }) { Text("Close") }
+                    }
                     Text(
-                        text = phrase.questionId?.toString() ?: "—",
+                        "Edit questions from this asset file.",
                         color = Muted,
-                        fontSize = 11.sp,
-                        modifier = Modifier.width(32.dp),
+                        fontSize = 12.sp,
                     )
-                    Text(
-                        text = "${phrase.prompt}  |  ${phrase.translation}",
-                        color = Ink,
-                        fontSize = 13.sp,
-                        modifier = Modifier.weight(1f),
-                        lineHeight = 17.sp,
-                    )
-                    CEFRCefrPicker(
-                        selected = phrase.cefr,
-                        enabled = phrase.questionId != null,
-                        onSelect = { cefr ->
-                            phrase.questionId?.let {
-                                onSaveQuestion(it, phrase.prompt, phrase.translation, cefr, showWords)
-                            }
+                    Button(
+                        onClick = {
+                            questionBeingEdited = null
+                            questionEditorOpen = true
                         },
-                    )
-                    TextButton(onClick = {
-                        questionBeingEdited = phrase
-                        addQuestionOpen = true
-                    }) { Text("Edit") }
+                        colors = ButtonDefaults.buttonColors(containerColor = Green),
+                    ) { Text("Add") }
+                    if (questions.isEmpty()) {
+                        Text("This file contains no questions.", color = Muted, fontSize = 14.sp)
+                    }
+                    questions.forEach { question ->
+                        Card(
+                            colors = CardDefaults.cardColors(containerColor = Paper),
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    questionBeingEdited = question
+                                    questionEditorOpen = true
+                                },
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(12.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp),
+                            ) {
+                                Text(question.prompt, color = Ink, fontSize = 14.sp)
+                                Text(question.translation, color = Muted, fontSize = 13.sp)
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Text(question.cefr, color = GreenDark, fontSize = 12.sp)
+                                    TextButton(onClick = {
+                                        questionBeingEdited = question
+                                        questionEditorOpen = true
+                                    }) { Text("Edit") }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
-        if (addQuestionOpen) {
+        if (questionEditorOpen) {
             DictionaryQuestionDialog(
                 question = questionBeingEdited,
-                isWord = showWords,
-                onDismiss = { addQuestionOpen = false },
+                isWord = isWordAsset(file.name),
+                onDismiss = { questionEditorOpen = false },
                 onSave = { prompt, translation, cefr ->
+                    val hierarchyId = file.id
+                    if (hierarchyId == null) return@DictionaryQuestionDialog false
                     val saved = onSaveQuestion(
+                        file.assetPath,
+                        hierarchyId,
                         questionBeingEdited?.questionId,
                         prompt,
                         translation,
                         cefr,
-                        showWords,
+                        isWordAsset(file.name),
                     )
-                    if (saved) addQuestionOpen = false
+                    if (saved) questionEditorOpen = false
                     saved
                 },
             )

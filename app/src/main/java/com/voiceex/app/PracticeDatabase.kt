@@ -31,11 +31,11 @@ data class HierarchyNode(
     val id: Long? = null,
     val parentId: Long? = null,
     val name: String,
+    val assetPath: String = name,
     val isFile: Boolean = false,
-    val children: MutableList<HierarchyNode> = mutableListOf(),
-    var selected: Boolean = false,
-    var indeterminate: Boolean = false,
-    var parent: HierarchyNode? = null,
+    val children: List<HierarchyNode> = emptyList(),
+    val selected: Boolean = false,
+    val indeterminate: Boolean = false,
 )
 
 class PracticeDatabase(context: Context) : SQLiteOpenHelper(
@@ -248,53 +248,120 @@ class PracticeDatabase(context: Context) : SQLiteOpenHelper(
         return db.update("QUESTIONS", values, "ID = ?", arrayOf(questionId.toString())) == 1
     }
 
-    fun replaceHierarchyTree(nodes: List<HierarchyNode>) {
+    fun syncHierarchyTree(nodes: List<HierarchyNode>): List<HierarchyNode> {
         val db = writableDatabase
+        fun syncNode(node: HierarchyNode, parentId: Long?): HierarchyNode {
+            val selection = if (parentId == null) {
+                "PARENT_ID IS NULL AND NAME = ?"
+            } else {
+                "PARENT_ID = ? AND NAME = ?"
+            }
+            val args = if (parentId == null) {
+                arrayOf(node.name)
+            } else {
+                arrayOf(parentId.toString(), node.name)
+            }
+            val existingId = db.query(
+                "HIERARHY",
+                arrayOf("ID"),
+                selection,
+                args,
+                null,
+                null,
+                null,
+                "1",
+            ).use { cursor ->
+                if (cursor.moveToFirst()) cursor.getLong(0) else null
+            }
+            val id = existingId ?: db.insertOrThrow(
+                "HIERARHY",
+                null,
+                ContentValues().apply {
+                    put("PARENT_ID", parentId)
+                    put("NAME", node.name)
+                },
+            )
+            return node.copy(
+                id = id,
+                parentId = parentId,
+                children = node.children.map { syncNode(it, id) },
+            )
+        }
+
         db.beginTransaction()
         try {
-            db.delete("HIERARHY", null, null)
-            fun insertNode(node: HierarchyNode, parentId: Long?): Long {
-                val id = db.insertOrThrow(
-                    "HIERARHY",
-                    null,
-                    ContentValues().apply {
-                        put("PARENT_ID", parentId)
-                        put("NAME", node.name)
-                    },
-                )
-                node.children.forEach { child -> insertNode(child, id) }
-                return id
-            }
-            nodes.forEach { insertNode(it, null) }
+            val synced = nodes.map { syncNode(it, null) }
             db.setTransactionSuccessful()
+            return synced
         } finally {
             db.endTransaction()
         }
     }
 
-    fun loadHierarchyTree(parentId: Long? = null): List<HierarchyNode> {
-        val rows = readableDatabase.query(
-            "HIERARHY",
-            arrayOf("ID", "PARENT_ID", "NAME"),
-            if (parentId == null) "PARENT_ID IS NULL" else "PARENT_ID = ?",
-            if (parentId == null) null else arrayOf(parentId.toString()),
+    fun loadQuestionsForHierarchy(hierarchyId: Long): List<Phrase> {
+        val questions = mutableListOf<Phrase>()
+        readableDatabase.query(
+            "QUESTIONS",
+            arrayOf("ID", "QTEXT", "TRANSLATION", "ACCEPTED_TRANSLATIONS", "CEFR", "IS_WORD"),
+            "ACTIVE = 1 AND HIERARHY_ID = ?",
+            arrayOf(hierarchyId.toString()),
             null,
             null,
             "ID",
-        )
-        val result = mutableListOf<HierarchyNode>()
-        rows.use { cursor ->
+        ).use { cursor ->
             while (cursor.moveToNext()) {
-                val id = cursor.getLong(0)
-                val node = HierarchyNode(
-                    id = id,
-                    parentId = if (cursor.isNull(1)) null else cursor.getLong(1),
-                    name = cursor.getString(2),
-                    children = loadHierarchyTree(id).toMutableList(),
-                    isFile = false,
+                questions += Phrase(
+                    prompt = cursor.getString(1),
+                    translation = cursor.getString(2),
+                    acceptedTranslations = decodeTranslations(cursor.getString(3)),
+                    questionId = cursor.getLong(0),
+                    cefr = cursor.getString(4),
+                    isWord = cursor.getInt(5) != 0,
                 )
-                result += node
             }
+        }
+        return questions
+    }
+
+    fun replaceQuestionsForHierarchy(hierarchyId: Long, questions: List<Phrase>): List<Phrase> {
+        val db = writableDatabase
+        val result = mutableListOf<Phrase>()
+        db.beginTransaction()
+        try {
+            db.execSQL("UPDATE QUESTIONS SET ACTIVE = 0 WHERE HIERARHY_ID = ?", arrayOf(hierarchyId))
+            questions.forEach { phrase ->
+                val existing = db.query(
+                    "QUESTIONS",
+                    arrayOf("ID"),
+                    "QTEXT = ? AND IS_WORD = ? AND HIERARHY_ID = ?",
+                    arrayOf(phrase.prompt, if (phrase.isWord) "1" else "0", hierarchyId.toString()),
+                    null,
+                    null,
+                    "ID",
+                    "1",
+                ).use { cursor ->
+                    if (cursor.moveToFirst()) cursor.getLong(0) else null
+                }
+                val values = ContentValues().apply {
+                    put("QTEXT", phrase.prompt)
+                    put("TRANSLATION", phrase.translation)
+                    put("ACCEPTED_TRANSLATIONS", encodeTranslations(phrase.acceptedTranslations))
+                    put("CEFR", phrase.cefr)
+                    put("IS_WORD", if (phrase.isWord) 1 else 0)
+                    put("HIERARHY_ID", hierarchyId)
+                    put("ACTIVE", 1)
+                }
+                val questionId = if (existing == null) {
+                    db.insertOrThrow("QUESTIONS", null, values)
+                } else {
+                    db.update("QUESTIONS", values, "ID = ?", arrayOf(existing.toString()))
+                    existing
+                }
+                result += phrase.copy(questionId = questionId)
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
         }
         return result
     }

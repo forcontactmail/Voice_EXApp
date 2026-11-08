@@ -17,18 +17,12 @@ data class Phrase(
     }
 }
 
-fun questionsForSelectedAssets(
-    phrases: List<Phrase>,
-    words: List<Phrase>,
+fun questionsFromSelectedAssets(
+    assetQuestions: Map<String, List<Phrase>>,
     selectedAssetPaths: Set<String>,
-): List<Phrase> = buildList {
-    if (selectedAssetPaths.any { it.substringAfterLast('/').equals("phrases.txt", ignoreCase = true) }) {
-        addAll(phrases)
-    }
-    if (selectedAssetPaths.any { it.substringAfterLast('/').equals("Words.txt", ignoreCase = true) }) {
-        addAll(words)
-    }
-}
+): List<Phrase> = assetQuestions.entries
+    .filter { it.key in selectedAssetPaths }
+    .flatMap { it.value }
 
 class FirstTryRating private constructor(
     val attemptedPhraseIndexes: Set<Int>,
