@@ -109,6 +109,12 @@ private val COMMON_ENGLISH_RECOGNITION_LANGUAGES = listOf(
 
 private data class AnswerReveal(val recognized: String, val expected: String)
 
+private data class PendingSpeech(
+    val text: String,
+    val language: String,
+    val onFinished: (() -> Unit)?,
+)
+
 private data class PracticeUiState(
     val sourceText: String = "",
     val phrases: List<Phrase> = emptyList(),
@@ -154,6 +160,9 @@ class MainActivity : androidx.activity.ComponentActivity() {
     private var speechRecognizer: SpeechRecognizer? = null
     private var speechRecognizerIsOnDevice: Boolean? = null
     private var textToSpeech: TextToSpeech? = null
+    private var textToSpeechReady = false
+    private var textToSpeechInitializationFailed = false
+    private var pendingSpeech: PendingSpeech? = null
     private var isListening = false
     private var awaitingRecognitionResult = false
     private var recognitionAttemptId = 0L
@@ -189,6 +198,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
         loadSavedAnswerCheckDelay()
         loadSavedRecognitionLanguage()
         loadSavedOfflineRecognition()
+        initializeSpeech()
         loadAssetDictionaries()
         setContent {
             MaterialTheme(colorScheme = lightColorScheme(
@@ -231,27 +241,43 @@ class MainActivity : androidx.activity.ComponentActivity() {
                 }
             }
         }
-        mainHandler.post(::initializeSpeech)
     }
 
     private fun initializeSpeech() {
         if (ensureSpeechRecognizer(forceOnline = true)) loadRecognitionLanguages()
 
         textToSpeech = TextToSpeech(this) { result ->
-            if (result == TextToSpeech.SUCCESS) {
-                textToSpeech?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-                    override fun onStart(id: String?) = Unit
-                    override fun onDone(id: String?) = runOnUiThread { finishSpeech(id) }
-                    @Deprecated("Deprecated in Java")
-                    override fun onError(id: String?) = runOnUiThread {
-                        updateState { copy(recognitionStatus = "Could not speak the phrase. Check the installed voices in Android settings.") }
-                        finishSpeech(id)
+            mainHandler.post {
+                if (result == TextToSpeech.SUCCESS) {
+                    textToSpeechReady = true
+                    textToSpeech?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                        override fun onStart(id: String?) = Unit
+                        override fun onDone(id: String?) = runOnUiThread { finishSpeech(id) }
+                        @Deprecated("Deprecated in Java")
+                        override fun onError(id: String?) = runOnUiThread {
+                            updateState { copy(recognitionStatus = "Could not speak the phrase. Check the installed voices in Android settings.") }
+                            finishSpeech(id)
+                        }
+                        override fun onError(id: String?, errorCode: Int) = onError(id)
+                    })
+                    loadVoices()
+                    pendingSpeech?.let { request ->
+                        pendingSpeech = null
+                        startSpeech(request)
                     }
-                    override fun onError(id: String?, errorCode: Int) = onError(id)
-                })
-                loadVoices()
-            } else {
-                updateState { copy(voiceStatus = "Text-to-speech is unavailable. Install a text-to-speech service in Android settings.") }
+                } else {
+                    textToSpeechInitializationFailed = true
+                    updateState {
+                        copy(voiceStatus = "Text-to-speech is unavailable. Install or enable a text-to-speech service in Android settings.")
+                    }
+                    pendingSpeech?.let { request ->
+                        pendingSpeech = null
+                        updateState {
+                            copy(recognitionStatus = "Could not speak the prompt; starting microphone recognition without audio.")
+                        }
+                        request.onFinished?.invoke()
+                    }
+                }
             }
         }
     }
@@ -1211,21 +1237,40 @@ class MainActivity : androidx.activity.ComponentActivity() {
     }
 
     private fun speak(text: String, language: String, onFinished: (() -> Unit)? = null) {
-        val engine = textToSpeech
-        if (engine == null) {
-            updateState { copy(recognitionStatus = "Text-to-speech is unavailable or not ready. Check the Android text-to-speech service.") }
+        val request = PendingSpeech(text, language, onFinished)
+        cancelSpeech()
+        if (textToSpeechInitializationFailed) {
+            updateState {
+                copy(recognitionStatus = "Could not speak the prompt; starting microphone recognition without audio.")
+            }
+            onFinished?.invoke()
             return
         }
-        cancelSpeech()
-        val selected = if (language.startsWith("ru")) uiState.selectedRussianVoice else uiState.selectedEnglishVoice
+        if (!textToSpeechReady || textToSpeech == null) {
+            pendingSpeech = request
+            updateState { copy(recognitionStatus = "Preparing text-to-speech...") }
+            return
+        }
+        startSpeech(request)
+    }
+
+    private fun startSpeech(request: PendingSpeech) {
+        val engine = textToSpeech ?: run {
+            pendingSpeech = request
+            updateState { copy(recognitionStatus = "Preparing text-to-speech...") }
+            return
+        }
+        val selected = if (request.language.startsWith("ru")) uiState.selectedRussianVoice else uiState.selectedEnglishVoice
         val voice = engine.voices.orEmpty().firstOrNull { it.name == selected }
-        if (voice != null) engine.voice = voice else engine.language = Locale.forLanguageTag(language)
+        if (voice != null) engine.voice = voice else engine.language = Locale.forLanguageTag(request.language)
         val id = UUID.randomUUID().toString()
         utteranceId = id
-        speechContinuation = onFinished
-        val result = engine.speak(text, TextToSpeech.QUEUE_FLUSH, null, id)
+        speechContinuation = request.onFinished
+        val result = engine.speak(request.text, TextToSpeech.QUEUE_FLUSH, null, id)
         if (result == TextToSpeech.ERROR) {
-            updateState { copy(recognitionStatus = "Could not start text-to-speech.") }
+            updateState {
+                copy(recognitionStatus = "Could not start text-to-speech; starting microphone recognition without audio.")
+            }
             finishSpeech(id)
         }
     }
@@ -1241,11 +1286,15 @@ class MainActivity : androidx.activity.ComponentActivity() {
     private fun cancelSpeech() {
         utteranceId = null
         speechContinuation = null
+        pendingSpeech = null
         textToSpeech?.stop()
     }
 
     private fun cancelRecognition() {
-        mainHandler.removeCallbacksAndMessages(null)
+        recognitionStartTimeout?.let(mainHandler::removeCallbacks)
+        recognitionResultTimeout?.let(mainHandler::removeCallbacks)
+        pendingRecognitionRestart?.let(mainHandler::removeCallbacks)
+        pendingAnswerCheck?.let(mainHandler::removeCallbacks)
         recognitionStartTimeout = null
         recognitionResultTimeout = null
         finishRecognitionSupportCheck()
@@ -2176,7 +2225,7 @@ private fun AssetDictionaryScreen(
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Text("Dictionary", color = Ink, fontSize = 28.sp, fontFamily = FontFamily.Serif)
         Text(
-            "Asset files: ${allAssetFiles(assetHierarchy).size}. Tap a file to open its dictionary.",
+            "Folders and files from app/src/main/assets (${allAssetFiles(assetHierarchy).size} files). Tap a file to open its dictionary.",
             color = Muted,
             fontSize = 13.sp,
             lineHeight = 19.sp,
