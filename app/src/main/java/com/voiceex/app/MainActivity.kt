@@ -881,6 +881,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
                 RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS,
                 RECOGNITION_POSSIBLY_COMPLETE_SILENCE_MILLIS,
             )
+
             //putExtra(
             //    RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS,
             //    RECOGNITION_COMPLETE_SILENCE_MILLIS,
