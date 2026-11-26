@@ -81,6 +81,9 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.UUID
 import kotlin.math.roundToInt
+import android.util.Log
+import androidx.compose.foundation.text.selection.SelectionContainer
+
 
 private val Paper = Color(0xFFF4F6F1)
 private val Ink = Color(0xFF1C2926)
@@ -90,7 +93,7 @@ private val GreenDark = Color(0xFF105B49)
 private val Coral = Color(0xFFC85C47)
 private val Line = Color(0xFFDCE3DC)
 private const val DEFAULT_RECOGNITION_LANGUAGE = "en-US"
-private const val RECOGNITION_POSSIBLY_COMPLETE_SILENCE_MILLIS = 2_000
+private const val RECOGNITION_POSSIBLY_COMPLETE_SILENCE_MILLIS = 50
 private const val RECOGNITION_COMPLETE_SILENCE_MILLIS = 3_000
 private const val MAX_ANSWER_CHECK_DELAY_HALF_SECONDS = 10
 private const val ANSWER_CHECK_DELAY_STEP_MILLIS = 500L
@@ -438,7 +441,8 @@ class MainActivity : androidx.activity.ComponentActivity() {
             }.also { mainHandler.postDelayed(it, RECOGNITION_SUPPORT_TIMEOUT_MILLIS) }
             val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+                putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 20)
+                putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
             }
             try {
                 recognizer.checkRecognitionSupport(
@@ -610,6 +614,9 @@ class MainActivity : androidx.activity.ComponentActivity() {
                 .getStringSet(SELECTED_ASSET_PATHS_KEY, null)
                 ?.toSet()
             val fileTree = buildAssetHierarchyTree(assets)
+
+            Log.d("SpeechVG_Assets", "Assets tree: ${allAssetFiles(fileTree).map { it.assetPath }}")
+
             val initialSelection = storedSelection ?: allAssetFilePaths(fileTree)
             val parsedFiles = allAssetFiles(fileTree)
                 .filter { isDictionaryAsset(it.name) }
@@ -854,7 +861,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
                 isActive = true,
                 isPaused = false,
                 reveal = null,
-                feedback = "Say the English translation. Repeat question, skip question, previous question, first question, rating, or clear rating are available.",
+                feedback = "Say the English translation. Repeat question, skip question, skip 10 questions, previous question, first question, rating, or clear rating are available.",
                 recognitionStatus = "Listen to the source phrase...",
             )
         }
@@ -875,17 +882,22 @@ class MainActivity : androidx.activity.ComponentActivity() {
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, language)
-            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 5)
-            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
+            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 20)
+            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
             putExtra(
                 RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS,
                 RECOGNITION_POSSIBLY_COMPLETE_SILENCE_MILLIS,
             )
 
-            //putExtra(
-            //    RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS,
-            //    RECOGNITION_COMPLETE_SILENCE_MILLIS,
-            //)
+            putExtra(
+                RecognizerIntent.EXTRA_SEGMENTED_SESSION,
+                RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS
+            )
+
+            putExtra(
+                RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS,
+                RECOGNITION_COMPLETE_SILENCE_MILLIS,
+            )
         }
         try {
             val attemptId = ++recognitionAttemptId
@@ -988,10 +1000,90 @@ class MainActivity : androidx.activity.ComponentActivity() {
             val alternatives = results
                 ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                 .orEmpty()
-            handleRecognition(alternatives)
+            handleRecognition(alternatives, recognizedSegments)
         }
 
-        override fun onPartialResults(partialResults: Bundle?) = Unit
+        override fun onPartialResults(partialResults: Bundle?) {
+
+            Log.d("MainActivityVG", "1000 onPartialResults::BEFORE alternatives")
+
+            val alternatives = partialResults
+                ?.getStringArrayList(SpeechRecognizer.RESULTS_ALTERNATIVES)
+                .orEmpty()
+
+            for ((index, alternativeItem) in alternatives.withIndex()) {
+                Log.d(
+                    "MainActivityVG",
+                    "2${index.toString().padStart(3, '0')}::===> $alternativeItem"
+                )
+            }
+
+            Log.d("MainActivityVG", "13000 onPartialResults::BEFORE partialResults")
+
+            val partial_result = partialResults
+                ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                .orEmpty()
+
+            for ((index, partial_Item) in partial_result.withIndex()) {
+                Log.d(
+                    "MainActivityVG",
+                    "4${index.toString().padStart(3, '0')}::===> $partial_Item"
+                )
+            }
+
+        }
+
+        /*
+        private val recognizedSegments = mutableListOf<String>()
+
+        override fun onSegmentResults(segmentResults: Bundle) {
+            val alternatives = segmentResults
+                .getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+
+            Log.d("SpeechVG", "onSegmentResults: $alternatives")
+
+            alternatives?.forEachIndexed { index, text ->
+                Log.d("SpeechVG", "Сегмент, вариант $index: $text")
+            }
+
+            alternatives?.firstOrNull()?.let { recognizedSegments.add(it) }
+        }
+        */
+
+        private val recognizedSegments = mutableListOf<ArrayList<String>>()
+
+        override fun onSegmentResults(segmentResults: Bundle) {
+            val alternatives =
+                segmentResults.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+
+            Log.d("SpeechVG", "onSegmentResults: $alternatives")
+
+            alternatives?.let { recognizedSegments.add(ArrayList(it)) }
+        }
+
+        override fun onEndOfSegmentedSession() {
+            val recognizedResult = mutableListOf<String>()
+
+            Log.d("SpeechVG", "Итог: $recognizedSegments")
+
+            recognizedSegments.forEach { segmentAlternatives ->
+                Log.d("SpeechVG", "Итог: onSegmentResults: $segmentAlternatives")
+                segmentAlternatives.firstOrNull()?.let { recognizedResult.add(it) }
+
+            }
+
+            handleRecognition(recognizedResult, recognizedSegments )
+
+            recognizedSegments.clear()
+        }
+/*
+        override fun onEndOfSegmentedSession() {
+            Log.d("SpeechVG", "Итог: ${recognizedSegments.joinToString("::")}")
+            handleRecognition(recognizedSegments)
+            recognizedSegments.clear()
+        }
+*/
+
         override fun onEvent(eventType: Int, params: Bundle?) = Unit
     }
 
@@ -1021,7 +1113,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
         }.also { mainHandler.postDelayed(it, RECOGNITION_RESULT_TIMEOUT_MILLIS) }
     }
 
-    private fun handleRecognition(alternatives: List<String>) {
+    private fun handleRecognition(alternatives: List<String>, alternativesArray: List<ArrayList<String>>) {
         if (!uiState.isActive) return
         if (alternatives.isEmpty()) {
             retryAfterUnrecognizedSpeech()
@@ -1039,6 +1131,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
             skipQuestion()
             return
         }
+
         if (alternatives.any(::isClearRatingCommand)) {
             clearRating()
             return
@@ -1064,11 +1157,51 @@ class MainActivity : androidx.activity.ComponentActivity() {
                 beginPrompt()
                 return
             }
+
+            is PhraseNavigationCommand.NextPhrases -> {
+                updateState {
+                    copy(
+                        currentIndex = (currentIndex + navigationCommand.count).coerceAtLeast(0),
+                        reveal = null,
+                    )
+                }
+                beginPrompt()
+                return
+            }
             null -> Unit
         }
-        checkAnswerAfterDelay(alternatives)
+        checkAnswerAfterDelay(alternatives, alternativesArray )
     }
 
+    private fun skip10_Questions() {
+        val phrase = uiState.activeQuestions.getOrNull(uiState.currentIndex)
+        if (phrase != null && phrase.questionId != null) {
+            currentSessionId?.let { sessionId ->
+                recordHistoryChange { practiceDatabase.recordSkippedQuestion(sessionId, phrase.questionId) }
+            }
+        }
+        val nextIndex = uiState.currentIndex + 10
+        val isComplete = nextIndex >= uiState.activeQuestions.size
+        updateState {
+            copy(
+                currentIndex = nextIndex,
+                isActive = !isComplete,
+                reveal = null,
+                feedback = if (isComplete) {
+                    "Question skipped. Practice complete."
+                } else {
+                    "Question skipped."
+                },
+                recognitionStatus = "",
+            )
+        }
+        if (isComplete) {
+            finishHistorySession()
+            speak("Practice complete.", "en-US", ::stopPracticeService)
+        } else {
+            speak("Skipping question.", "en-US") { beginPrompt() }
+        }
+    }
     private fun skipQuestion() {
         val phrase = uiState.activeQuestions.getOrNull(uiState.currentIndex)
         if (phrase != null && phrase.questionId != null) {
@@ -1121,10 +1254,10 @@ class MainActivity : androidx.activity.ComponentActivity() {
         listenAgain()
     }
 
-    private fun checkAnswerAfterDelay(alternatives: List<String>) {
+    private fun checkAnswerAfterDelay(alternatives: List<String>, alternativesArray: List<ArrayList<String>>) {
         val delayMillis = answerCheckDelayMillis(uiState.answerCheckDelayHalfSeconds)
         if (delayMillis == 0L) {
-            checkAnswer(alternatives)
+            checkAnswer(alternatives, alternativesArray )
             return
         }
 
@@ -1133,7 +1266,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
         pendingAnswerCheck = Runnable {
             pendingAnswerCheck = null
             if (uiState.isActive && uiState.currentIndex == phraseIndex) {
-                checkAnswer(alternatives)
+                checkAnswer(alternatives, alternativesArray )
             }
         }.also { mainHandler.postDelayed(it, delayMillis) }
     }
@@ -1166,9 +1299,95 @@ class MainActivity : androidx.activity.ComponentActivity() {
         speak("Rating cleared.", "en-US") { startListening(uiState.selectedRecognitionLanguage) }
     }
 
-    private fun checkAnswer(alternatives: List<String>) {
+    fun normalizeApostrophes(text: String): String =
+        text.replace('’', '\'')
+            .replace('‘', '\'')
+            .replace('ʼ', '\'')
+
+    private fun matchesOneSegment(
+        remainingTranslation: StringBuilder,
+        alternativesOneSegmentArray: ArrayList<String>,
+        recognizedError: StringBuilder
+    ): Boolean
+    {
+        var recognizedSegment : StringBuilder =  StringBuilder( "" )
+        alternativesOneSegmentArray.sortByDescending { it.length }
+
+        val bResult : Boolean           = alternativesOneSegmentArray.any {
+            value ->
+            //val regex       : Regex           = Regex("^(${Regex.escape(normalizeApostrophes(value))})(?:\\.)?(.*)$",RegexOption.IGNORE_CASE )
+            val punctuation = "[\\p{P}&&[^'’‘ʼ＇`]]"
+            val regex: Regex = Regex(
+                "^${punctuation}*(${normalizeApostrophes(value).map { Regex.escape(it.toString()) }
+                    .joinToString("${punctuation}*")})${punctuation}*(.*)$"
+                , RegexOption.IGNORE_CASE
+            )
+            val match       : MatchResult?    = regex.matchEntire(remainingTranslation)
+            remainingTranslation.replace(0, remainingTranslation.length, match?.groups?.get(2)?.value ?: remainingTranslation.toString() )
+            recognizedSegment                 = StringBuilder( match?.groups?.get(1)?.value ?: "" )
+            match                             != null
+        }
+
+        recognizedSegment = StringBuilder(
+            recognizedSegment.ifEmpty {
+                alternativesOneSegmentArray.firstOrNull().orEmpty()
+            }
+        )
+
+        recognizedError.append( recognizedSegment )
+
+        return bResult
+    }
+
+    private fun matchesOneTranslation(
+        strTranslation: StringBuilder,
+        alternativesArray: List<ArrayList<String>>,
+        recognizedError: StringBuilder
+    ): Boolean
+    {
+        alternativesArray.any {
+            value->
+            matchesOneSegment( strTranslation, value, recognizedError)
+                    && strTranslation.isEmpty()
+        }
+
+        return strTranslation.isEmpty()
+    }
+
+    private fun matchesPhrase(
+        phrase: Phrase,
+        alternativesArray: List<ArrayList<String>>,
+        recognizedError: StringBuilder
+    ): Boolean
+    {
+        var recognizedErrorBuffer: StringBuilder = StringBuilder( "" )
+
+        val bResult : Boolean = phrase.acceptedTranslations.any {
+            value->
+            recognizedErrorBuffer.setLength( 0 )
+            val matchesResult: Boolean = matchesOneTranslation( StringBuilder( normalizeApostrophes( value ) ), alternativesArray, recognizedErrorBuffer )
+            recognizedErrorBuffer
+                .takeIf { it.length > recognizedError.length }
+                ?.let { recognizedError.replace(0, recognizedError.length, it.toString()) }
+            matchesResult
+        }
+
+        return bResult
+    }
+
+    private fun checkAnswer(alternatives: List<String>, alternativesArray: List<ArrayList<String>>) {
         val phrase = uiState.activeQuestions.getOrNull(uiState.currentIndex) ?: return
-        if (alternatives.any(phrase::acceptsTranslation)) {
+        //var remainingExpression = phrase::acceptsTranslation
+        var recognizedError : StringBuilder = StringBuilder( "" )
+
+        alternativesArray.forEachIndexed { arrayIndex, stringArray ->
+            stringArray.forEachIndexed { elementIndex, value ->
+                Log.d("SpeechVG", "Массив $arrayIndex, элемент $elementIndex: $value")
+
+            }
+        }
+
+        if (alternatives.any(phrase::acceptsTranslation) && false || matchesPhrase(phrase, alternativesArray, recognizedError)) {
             phrase.questionId?.let { questionId ->
                 currentSessionId?.let { sessionId ->
                     recordHistoryChange { practiceDatabase.recordCorrectAnswer(sessionId, questionId) }
@@ -1206,7 +1425,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
                     recordHistoryChange { practiceDatabase.recordWrongAnswer(sessionId, questionId) }
                 }
             }
-            val recognized = formatRecognizedAnswer(alternatives.firstOrNull().orEmpty())
+            val recognized = formatRecognizedAnswer( recognizedError.toString() ) //alternatives.firstOrNull().orEmpty())
             updateState {
                 copy(
                     reveal = AnswerReveal(recognized, phrase.acceptedTranslations.joinToString(" / ")),
@@ -1858,16 +2077,18 @@ private fun VoicePracticeScreen(
                         color = Green,
                         trackColor = Line,
                     )
-                    Text(
-                        text = state.activeQuestions.getOrNull(state.currentIndex)?.prompt
-                            ?: if (state.activeQuestions.isNotEmpty()) "Practice complete"
-                            else "Select questions in Dictionary",
-                        modifier = Modifier.padding(top = 12.dp, bottom = 4.dp),
-                        color = Ink,
-                        fontSize = 26.sp,
-                        lineHeight = 32.sp,
-                        fontFamily = FontFamily.Serif,
-                    )
+                    SelectionContainer {
+                        Text(
+                            text = state.activeQuestions.getOrNull(state.currentIndex)?.prompt
+                                ?: if (state.activeQuestions.isNotEmpty()) "Practice complete"
+                                else "Select questions in Dictionary",
+                            modifier = Modifier.padding(top = 12.dp, bottom = 4.dp),
+                            color = Ink,
+                            fontSize = 26.sp,
+                            lineHeight = 32.sp,
+                            fontFamily = FontFamily.Serif,
+                        )
+                    }
                     state.reveal?.let { answer ->
                         Column(
                             modifier = Modifier
@@ -1880,7 +2101,14 @@ private fun VoicePracticeScreen(
                             Text(answer.recognized.ifBlank { "Speech not recognized" }, color = Ink, fontSize = 16.sp)
                             Spacer(Modifier.height(4.dp))
                             Text("CORRECT TRANSLATION", color = Coral, fontSize = 10.sp, fontWeight = FontWeight.Bold)
-                            Text(answer.expected, color = Ink, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                            SelectionContainer {
+                                Text(
+                                    answer.expected,
+                                    color = Ink,
+                                    fontSize = 16.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
                         }
                     }
                     Text(
@@ -2081,11 +2309,12 @@ private fun HistoryQuestionDetails(
 
 private fun buildAssetHierarchyTree(
     assetManager: AssetManager,
-    baseDir: String = "",
-    parentPath: String = "",
+    baseDir: String = "dictionary",
+    parentPath: String = "dictionary",
 ): List<HierarchyNode> {
     val roots = mutableListOf<HierarchyNode>()
     val entries = assetManager.list(baseDir).orEmpty()
+    Log.d("SpeechVG_Assets", "AssetManager.list('$baseDir') = ${entries.toList()}")
     entries.sorted().forEach { name ->
         val path = if (baseDir.isEmpty()) name else "$baseDir/$name"
         val nested = assetManager.list(path).orEmpty()

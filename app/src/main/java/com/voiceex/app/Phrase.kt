@@ -223,6 +223,7 @@ fun isOnDeviceLanguageAvailable(language: String, installedLanguages: Set<String
 sealed interface PhraseNavigationCommand {
     data object FirstPhrase : PhraseNavigationCommand
     data class PreviousPhrases(val count: Int) : PhraseNavigationCommand
+    data class NextPhrases(val count: Int) : PhraseNavigationCommand
 }
 
 private val spokenPhraseCounts = mapOf(
@@ -239,7 +240,7 @@ private val spokenPhraseCounts = mapOf(
 )
 
 private val englishPreviousPhrasesPattern =
-    Regex("^(?:(?:go )?back|previous|go to previous|return to previous) (.+) questions?$")
+    Regex("^(?:(?:go )?skip|back|previous|go to previous|return to previous) (.+) questions?$")
 
 fun parsePhraseNavigationCommand(value: String): PhraseNavigationCommand? {
     val normalized = normalizeSpeech(value)
@@ -267,8 +268,14 @@ fun parsePhraseNavigationCommand(value: String): PhraseNavigationCommand? {
         return PhraseNavigationCommand.PreviousPhrases(1)
     }
 
+    val skipQuestionTextPattern:Regex = Regex("^(skip) (.+) questions?$" )
+    val SkipText = skipQuestionTextPattern.matchEntire(normalized)?.groupValues?.get(1)
+
     val countText = englishPreviousPhrasesPattern.matchEntire(normalized)?.groupValues?.get(1)
         ?: return null
     val count = countText.toIntOrNull() ?: spokenPhraseCounts[countText] ?: return null
-    return count.takeIf { it > 0 }?.let(PhraseNavigationCommand::PreviousPhrases)
+    return count.takeIf { it > 0 }?.let(PhraseNavigationCommand::PreviousPhrases
+        .takeIf { SkipText?.isEmpty() ?: true  }
+        ?: PhraseNavigationCommand::NextPhrases
+    )
 }

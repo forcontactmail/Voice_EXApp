@@ -39,7 +39,7 @@ class VoicePracticeService : Service() {
     private fun createNotification(): Notification =
         NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
-            .setContentTitle("Voice Practice")
+            .setContentTitle("Voice Coаch")
             .setContentText("Voice practice is active")
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
             .setOngoing(true)

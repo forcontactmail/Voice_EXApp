@@ -63,15 +63,15 @@ class PhraseTest {
         )
         assertEquals(
             listOf(Phrase("слово", "word", cefr = "A1", isWord = true)),
-            parseAssetQuestions("words.txt", "слово | word | A1"),
+            parseAssetQuestions("dictionary/EN/words.txt", "слово | word | A1"),
         )
         assertEquals(
             listOf(Phrase("A", "B")),
-            parseAssetQuestions("phrases_B1_B2.txt", "A | B"),
+            parseAssetQuestions("dictionary/EN/phrases_B1_B2.txt", "A | B"),
         )
         assertEquals(
             listOf(Phrase("C", "D")),
-            parseAssetQuestions("phrases.txt", "C | D"),
+            parseAssetQuestions("dictionary/EN/phrases.txt", "C | D"),
         )
     }
 
@@ -81,19 +81,19 @@ class PhraseTest {
         val advancedPhrases = listOf(Phrase("advanced phrase", "translation"))
         val words = listOf(Phrase("word", "translation", isWord = true))
         val assetQuestions = mapOf(
-            "phrases.txt" to basicPhrases,
-            "phrases_B1_B2.txt" to advancedPhrases,
+            "dictionary/EN/phrases.txt" to basicPhrases,
+            "dictionary/EN/phrases_B1_B2.txt" to advancedPhrases,
             "Words.txt" to words,
-            "words.txt" to emptyList(),
+            "dictionary/EN/words.txt" to emptyList(),
         )
 
         assertEquals(
             listOf(advancedPhrases.single()),
-            questionsFromSelectedAssets(assetQuestions, setOf("phrases_B1_B2.txt")),
+            questionsFromSelectedAssets(assetQuestions, setOf("dictionary/EN/phrases_B1_B2.txt")),
         )
         assertEquals(
             listOf(basicPhrases.single(), words.single()),
-            questionsFromSelectedAssets(assetQuestions, setOf("Words.txt", "phrases.txt")),
+            questionsFromSelectedAssets(assetQuestions, setOf("Words.txt", "dictionary/EN/phrases.txt")),
         )
         assertTrue(questionsFromSelectedAssets(assetQuestions, emptySet()).isEmpty())
     }
